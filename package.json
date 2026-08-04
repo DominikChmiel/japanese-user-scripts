@@ -1,0 +1,15 @@
+{
+  "name": "review-recap-userscripts",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Tampermonkey userscripts that summarise what you got wrong in a WaniKani / Bunpro review session.",
+  "type": "module",
+  "scripts": {
+    "test": "node tests/run.mjs",
+    "test:wanikani": "node tests/wanikani-review-recap.test.mjs",
+    "test:bunpro": "node tests/bunpro-mistake-recap.test.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^27.0.0"
+  }
+}
