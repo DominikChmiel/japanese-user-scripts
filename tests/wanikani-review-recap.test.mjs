@@ -258,6 +258,149 @@ answer(perfectKanji, 'meaning', 'pass', 'male');
 await flush();
 check('Item Info stays shut on a correct answer', infoToggleClicks === clicksBeforePass);
 
+// -- Shift to peek, and the burn guard ---------------------------------------
+// The quiz page publishes the queue's SRS stages as JSON. Stage 8 is
+// Enlightened, so the next correct answer burns the item.
+const srsBlob = document.createElement('script');
+srsBlob.type = 'application/json';
+srsBlob.setAttribute('data-quiz-queue-target', 'subjectIdsWithSRS');
+srsBlob.textContent = JSON.stringify({
+  subject_ids_with_srs_info: [
+    [perfectKanji.id, 8, 1], // one pass away from burning
+    [vocab.id, 4, 1], // mid-Apprentice, nothing at stake
+  ],
+});
+document.body.append(srsBlob);
+
+function peekAt(subject, questionType) {
+  window.dispatchEvent(
+    new window.CustomEvent('willShowNextQuestion', { detail: { subject, questionType } })
+  );
+  window.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Shift' }));
+  return document.getElementById('wkrr-peek');
+}
+const releaseShift = () =>
+  window.dispatchEvent(new window.KeyboardEvent('keyup', { key: 'Shift' }));
+
+const safePeek = peekAt(vocab, 'meaning');
+check('holding Shift reveals the item', safePeek.classList.contains('is-visible'));
+check(
+  'an item with nothing at stake shows its meaning',
+  safePeek.textContent.includes(vocab.meanings[0].text),
+  safePeek.textContent
+);
+check('the asked half is highlighted', !!safePeek.querySelector('.wkrr-peek__row.is-asked'));
+releaseShift();
+check('releasing Shift hides it', !safePeek.classList.contains('is-visible'));
+
+const burnPeek = peekAt(perfectKanji, 'reading');
+check('an item about to burn is still shown', burnPeek.classList.contains('is-visible'));
+check('...but the answer is withheld', !!burnPeek.querySelector('.wkrr-peek__blocked'));
+check('...with the reason spelled out', /about to burn/i.test(burnPeek.textContent));
+check(
+  '...and no meaning or reading reaches the DOM',
+  !burnPeek.textContent.includes(perfectKanji.meanings[0].text) &&
+    !burnPeek.querySelector('.wkrr-readings') &&
+    !burnPeek.textContent.includes(perfectKanji.readings[0].reading),
+  burnPeek.textContent
+);
+releaseShift();
+
+// Missing a half drops the SRS stage, so there is no longer a burn to protect.
+answer(perfectKanji, 'reading', 'fail', 'まちがい');
+await flush();
+const afterMiss = peekAt(perfectKanji, 'reading');
+check(
+  'once the item has been missed the peek comes back',
+  !afterMiss.querySelector('.wkrr-peek__blocked') &&
+    afterMiss.textContent.includes(perfectKanji.meanings[0].text),
+  afterMiss.textContent
+);
+releaseShift();
+
+// -- current-level marker ----------------------------------------------------
+// The real Level Progress widget, lifted out of the dashboard snapshot: a lazy
+// turbo-frame listing every subject on the level as a subject-srs-progress link.
+const dashboardSnapshot = fs.readFileSync(path.join(SNAPSHOTS, 'WaniKani _ Dashboard.html'), 'utf8');
+const widgetAt = dashboardSnapshot.search(/class="level-progress-widget /);
+const widgetStart = dashboardSnapshot.lastIndexOf('<turbo-frame', widgetAt);
+const levelWidget = dashboardSnapshot.slice(
+  widgetStart,
+  dashboardSnapshot.indexOf('</turbo-frame>', widgetStart) + '</turbo-frame>'.length
+);
+const LEVEL_KEY = 'wk-review-recap:current-level';
+const onLevel = subjects.find((s) => s.characters === '雄'); // level 29, like perfectKanji
+const offLevel = subjects.find((s) => s.characters === '湯'); // level 12-ish, like kanji
+
+const dashboardProbe = runUserscript('wanikani-review-recap.user.js', {
+  url: 'https://www.wanikani.com/dashboard',
+  html: `<!doctype html><html><head></head><body>${levelWidget}</body></html>`,
+});
+const cached = JSON.parse(dashboardProbe.window.localStorage.getItem(LEVEL_KEY) || 'null');
+check('the current level is read off the dashboard widget', cached && cached.level === 29, cached);
+check('every subject on the level is cached', cached && cached.paths.length === 163, cached.paths.length);
+check(
+  '...keyed by the same subject paths the panel links to',
+  cached.paths.includes('/kanji/雄') && cached.paths.includes('/radicals/charcoal'),
+  cached.paths.slice(0, 3)
+);
+
+// Previous/Next browse other levels, and those visits put a level= on the src.
+const browsedProbe = runUserscript('wanikani-review-recap.user.js', {
+  url: 'https://www.wanikani.com/dashboard',
+  html: `<!doctype html><html><head></head><body>${levelWidget.replace(
+    /(src="[^"]*widgets\/level-progress)\?/,
+    '$1?level=28&'
+  )}</body></html>`,
+});
+check(
+  'browsing to another level is not mistaken for your own',
+  browsedProbe.window.localStorage.getItem(LEVEL_KEY) === null
+);
+
+const marked = runUserscript('wanikani-review-recap.user.js', {
+  url: 'https://www.wanikani.com/subjects/review',
+  html: `<!doctype html><html><head></head><body>
+     <div class="quiz"><div class="character-header"><div class="character-header__content">
+       <div class="character-header__characters" lang="ja">雄</div>
+       <div class="character-header__meaning"></div>
+     </div></div></div>
+   </body></html>`,
+  setup(w) {
+    w.localStorage.setItem(LEVEL_KEY, JSON.stringify({ level: 29, paths: ['/kanji/雄'] }));
+  },
+});
+const ask = (subject) =>
+  marked.window.dispatchEvent(
+    new marked.window.CustomEvent('willShowNextQuestion', {
+      detail: { subject, questionType: 'meaning' },
+    })
+  );
+
+ask(onLevel);
+const mark = marked.window.document.getElementById('wkrr-level');
+check('a current-level item is marked', !!mark);
+check('the mark names the level', mark && mark.textContent === 'Level 29', mark && mark.textContent);
+check(
+  'it sits directly under the character being quizzed',
+  mark &&
+    mark.previousElementSibling ===
+      marked.window.document.querySelector('.character-header__characters')
+);
+
+ask(offLevel);
+check(
+  'an item from an earlier level is not marked',
+  !marked.window.document.getElementById('wkrr-level')
+);
+
+ask(onLevel);
+marked.tick();
+check(
+  'the mark comes back, and the tick does not duplicate it',
+  marked.window.document.querySelectorAll('#wkrr-level').length === 1
+);
+
 // -- theming -----------------------------------------------------------------
 check('the panel carries a resolved theme', ['light', 'dark'].includes(panel.dataset.theme));
 

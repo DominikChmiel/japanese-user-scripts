@@ -41,23 +41,9 @@
 
   const PANEL_WIDTH = 'clamp(280px, 20%, 460px)'; // the "rest" of the 80/20 split
   const STORAGE_KEY = 'wk-review-recap:v1';
+  const LEVEL_STORAGE_KEY = 'wk-review-recap:current-level';
   const EXPIRY_MS = 12 * 60 * 60 * 1000; // drop a stale session after 12h
   const MAX_WRONG_PER_TYPE = 12;
-
-  // Bundle the "WaniKani Elementary Dark" userstyle (userstyles.world/style/22026)
-  // so a separate Stylus install isn't needed. Set to false to leave WaniKani's
-  // own styling alone. The CSS is embedded in DARK_THEME_CSS near the bottom.
-  const LOAD_DARK_THEME = true;
-
-  // Pop WaniKani's own Item Info panel (the "F" hotkey) open whenever you get
-  // something wrong, and expand the reading / explanation sections inside it.
-  const AUTO_OPEN_ITEM_INFO_ON_FAIL = true;
-  const EXPAND_ALL_ITEM_INFO_SECTIONS = true;
-
-  // WaniKani hands out new lessons and reviews on the hour, so a tab left open
-  // keeps showing a stale count. Re-fetch just those numbers when the hour turns
-  // (see the "lesson/review counts" section - no page reload involved).
-  const AUTO_REFRESH_COUNTS = true;
 
   // Item Info runs a little small - scale WaniKani's font-size scale inside it.
   const ITEM_INFO_FONT_SCALE = 1.15;
@@ -212,7 +198,7 @@
     if (!toggle.classList.contains('additional-content__item--open')) {
       toggle.click();
     }
-    if (EXPAND_ALL_ITEM_INFO_SECTIONS) expandItemInfoSections();
+    expandItemInfoSections();
   }
 
   /*
@@ -246,7 +232,7 @@
     const failed = !!detail.results && detail.results.action === 'fail';
     const type = detail.questionType === 'reading' ? 'reading' : 'meaning';
 
-    if (failed && AUTO_OPEN_ITEM_INFO_ON_FAIL) {
+    if (failed) {
       // Let WaniKani's own didAnswerQuestion listeners run first: the toggle is
       // still disabled until item_info_controller#enable has fired.
       setTimeout(openItemInfo, 0);
@@ -778,6 +764,63 @@
       currentQuestionType = detail.questionType === 'reading' ? 'reading' : 'meaning';
     }
     hidePeek(); // never carry a reveal across to the next item
+    ensureLevelMark(); // straight away - waiting for the tick would lag the item
+  }
+
+  // ------------------------------------------------------------------- srs --
+
+  /*
+   * The quiz page ships the SRS stage of everything in the queue as JSON:
+   *
+   *   <script type="application/json" data-quiz-queue-target="subjectIdsWithSRS">
+   *     {"subject_ids_with_srs_info": [[3920,5,1], [844,2,1], ...],
+   *      "srs_ids_stage_names": [[1, ["Unlocked","Apprentice", ..., "Burned"]]]}
+   *
+   * Each triple is [subject_id, srs_stage, srs_system_id] and the stage indexes
+   * into that system's name list, so stage 8 is Enlightened - one more correct
+   * answer and the item burns.
+   */
+  const BURN_FROM_STAGE = 8;
+  const SRS_BLOB_SELECTOR =
+    'script[type="application/json"][data-quiz-queue-target="subjectIdsWithSRS"]';
+
+  let srsStages = null;
+  let srsSource = ''; // the JSON we parsed, so a Turbo swap re-reads it
+
+  function parseSrsStages(json) {
+    const stages = new Map();
+    try {
+      const parsed = JSON.parse(json);
+      for (const entry of parsed.subject_ids_with_srs_info || []) {
+        if (Array.isArray(entry) && entry.length >= 2) stages.set(entry[0], entry[1]);
+      }
+    } catch (e) {
+      /* payload changed shape - carry on with no stage information */
+    }
+    return stages;
+  }
+
+  function srsStageOf(subjectId) {
+    const blob = document.querySelector(SRS_BLOB_SELECTOR);
+    const source = blob ? blob.textContent : '';
+    if (!srsStages || source !== srsSource) {
+      srsSource = source;
+      srsStages = parseSrsStages(source);
+    }
+    const stage = srsStages.get(subjectId);
+    return typeof stage === 'number' ? stage : null;
+  }
+
+  /*
+   * An item only burns if it comes through the whole session clean. Once either
+   * half has been missed its stage drops instead, so there is no longer a burn to
+   * protect and the peek is fair game again.
+   */
+  function wouldBurn(record) {
+    if (!record) return false;
+    if (srsStageOf(record.id) !== BURN_FROM_STAGE) return false;
+    const tracked = store.items[record.id];
+    return !tracked || failedTypes(tracked).length === 0;
   }
 
   // --------------------------------------------------------------- peek --
@@ -790,13 +833,46 @@
   function buildPeek() {
     const record = currentSubject;
     if (!record) return el('div');
-    const { primary, alternative } = meaningsOf(record);
-    const groups = readingGroupsOf(record);
     const color = TYPE_COLOR[record.type] || '#8a8a8a';
+    // A study aid, not a cheat code: an item one correct answer away from
+    // burning is the one place revealing it would do real damage.
+    const blocked = wouldBurn(record);
 
     const characterNode = record.image
-      ? el('img', { class: 'wkrr-peek__image', src: record.image, alt: primary[0] || '' })
+      ? el('img', { class: 'wkrr-peek__image', src: record.image, alt: '' })
       : el('span', { class: 'wkrr-peek__chars', lang: 'ja', text: record.characters || '?' });
+
+    const head = el(
+      'div',
+      { class: 'wkrr-peek__head' },
+      characterNode,
+      el('span', { class: 'wkrr-peek__type', text: TYPE_LABEL[record.type] || record.type })
+    );
+    const hint = el('div', { class: 'wkrr-peek__hint', text: 'Release Shift to hide' });
+
+    // Nothing of the answer is built in this branch - a burn is worth more than
+    // the convenience, so it never reaches the DOM to be read out of.
+    if (blocked) {
+      return el(
+        'div',
+        { class: 'wkrr-peek__inner', style: '--wkrr-accent:' + color },
+        head,
+        el(
+          'div',
+          { class: 'wkrr-peek__blocked' },
+          el('div', { class: 'wkrr-peek__blocked-title', text: 'Enlightened - about to burn' }),
+          el('div', {
+            class: 'wkrr-peek__blocked-text',
+            text: 'Answer this one on your own. Miss either half and the peek comes back.',
+          })
+        ),
+        hint
+      );
+    }
+
+    const { primary, alternative } = meaningsOf(record);
+    const groups = readingGroupsOf(record);
+    if (record.image) characterNode.alt = primary[0] || '';
 
     const rows = [];
     if (primary.length || alternative.length) {
@@ -843,14 +919,9 @@
     return el(
       'div',
       { class: 'wkrr-peek__inner', style: '--wkrr-accent:' + color },
-      el(
-        'div',
-        { class: 'wkrr-peek__head' },
-        characterNode,
-        el('span', { class: 'wkrr-peek__type', text: TYPE_LABEL[record.type] || record.type })
-      ),
+      head,
       el('div', { class: 'wkrr-peek__body' }, rows),
-      el('div', { class: 'wkrr-peek__hint', text: 'Release Shift to hide' })
+      hint
     );
   }
 
@@ -952,11 +1023,113 @@
    * each tab patches its own DOM, so there is nothing to share between them.
    */
   function checkHourChange() {
-    if (!AUTO_REFRESH_COUNTS || isReviewPage()) return;
+    if (isReviewPage()) return;
     const hour = new Date().getHours();
     if (hour === lastCountHour) return;
     lastCountHour = hour;
     refreshCounts();
+  }
+
+  // ------------------------------------------------------------ level mark --
+
+  /*
+   * The quiz carries no level information - not in the subject queue, not in the
+   * SRS payload, not in Item Info. The dashboard's Level Progress widget does
+   * though: it renders your current level and every one of its subjects as
+   *
+   *   <a href="https://www.wanikani.com/radicals/charcoal" class="subject-srs-progress">
+   *
+   * which is the same URL shape subjectUrl() already builds for the panel's
+   * cards. So read the set off the dashboard as you pass through it, cache it,
+   * and match on it during the review. No API token, no extra request.
+   */
+  let currentLevel = null; // { level: Number, paths: Set<String> }
+
+  function subjectPath(url) {
+    try {
+      return decodeURIComponent(new URL(url, location.href).pathname);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function loadCurrentLevel() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(LEVEL_STORAGE_KEY) || 'null');
+      if (parsed && parsed.level && Array.isArray(parsed.paths)) {
+        currentLevel = { level: parsed.level, paths: new Set(parsed.paths) };
+      }
+    } catch (e) {
+      /* corrupt or unavailable storage - the badge just stays off */
+    }
+  }
+
+  function saveCurrentLevel() {
+    try {
+      localStorage.setItem(
+        LEVEL_STORAGE_KEY,
+        JSON.stringify({ level: currentLevel.level, paths: [...currentLevel.paths] })
+      );
+    } catch (e) {
+      /* quota / private mode - it still works for this page load */
+    }
+  }
+
+  /*
+   * Runs off the tick because the widget arrives in a lazy turbo-frame. Its
+   * Previous/Next buttons browse other levels, and those visits put a `level=`
+   * on the frame's src - only the untouched view is showing *your* level.
+   */
+  function ensureCurrentLevel() {
+    const widget = document.querySelector('.level-progress-widget');
+    if (!widget) return;
+    const frame = widget.closest('turbo-frame[src]');
+    if (frame && /[?&]level=/.test(frame.getAttribute('src') || '')) return;
+
+    const label = [...widget.querySelectorAll('.wk-button__text')]
+      .map((node) => node.textContent.trim())
+      .find((text) => /^Level \d+$/.test(text));
+    const level = label ? Number(label.replace(/\D+/g, '')) : 0;
+    if (!level || (currentLevel && currentLevel.level === level)) return;
+
+    const paths = [...widget.querySelectorAll('a.subject-srs-progress[href]')]
+      .map((anchor) => subjectPath(anchor.getAttribute('href')))
+      .filter(Boolean);
+    if (!paths.length) return; // widget still filling in - try again next tick
+
+    currentLevel = { level, paths: new Set(paths) };
+    saveCurrentLevel();
+  }
+
+  function isCurrentLevel(record) {
+    if (!currentLevel || !record) return false;
+    const url = subjectUrl(record);
+    const path = url && subjectPath(url);
+    return !!path && currentLevel.paths.has(path);
+  }
+
+  /*
+   * Sits directly under the character being quizzed. WaniKani re-renders that
+   * header for every question, so this is idempotent and re-runs on each new
+   * question as well as off the tick.
+   */
+  function ensureLevelMark() {
+    const existing = document.getElementById('wkrr-level');
+    const anchor = document.querySelector('.character-header__characters');
+    const show = isReviewPage() && anchor && isCurrentLevel(currentSubject);
+
+    if (!show) {
+      if (existing) existing.remove();
+      return;
+    }
+
+    const text = 'Level ' + currentLevel.level;
+    if (existing) {
+      if (existing.textContent !== text) existing.textContent = text;
+      if (existing.previousElementSibling !== anchor) anchor.after(existing);
+      return;
+    }
+    anchor.after(el('div', { id: 'wkrr-level', text }));
   }
 
   // ------------------------------------------------------------------- css --
@@ -1145,6 +1318,22 @@ html.wkrr-collapsed #wkrr-panel {
   #wkrr-panel .wkrr-header, #wkrr-panel .wkrr-body { display: none; }
 }
 
+/*
+ * Current-level marker, directly under the character being quizzed. It only
+ * renders for current-level items, so its presence is the highlight - hence the
+ * solid pill rather than something that blends into the header.
+ */
+#wkrr-level {
+  margin: 8px auto 0; width: max-content;
+  padding: 3px 12px; border-radius: 999px;
+  font-family: var(--font-family-default, "Noto Sans", Helvetica, Arial, sans-serif);
+  font-size: 11px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase;
+  color: var(--USER-text, #ffffff);
+  background: rgba(0, 0, 0, .32);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .5);
+  text-shadow: none;
+}
+
 /* Shift-to-peek popover. Dark only, matching the panel's palette. */
 #wkrr-peek {
   --wkrr-bg: var(--USER-surface-1, #151515);
@@ -1190,6 +1379,13 @@ html.wkrr-collapsed #wkrr-panel {
 .wkrr-peek__hint {
   padding: 8px 16px 12px; color: var(--wkrr-faint); font-size: 11px;
 }
+/* Shown in place of the answer when revealing it would hand the item a burn. */
+.wkrr-peek__blocked { padding: 12px 16px 2px; display: flex; flex-direction: column; gap: 5px; }
+.wkrr-peek__blocked-title {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--color-srs-progress-enlightened, #0093dd);
+}
+.wkrr-peek__blocked-text { font-size: 13px; line-height: 1.45; color: var(--wkrr-muted); }
 `;
 
   /*
@@ -3023,12 +3219,13 @@ html.wkrr-collapsed #wkrr-panel {
   // ------------------------------------------------------------------ boot --
 
   /*
-   * Inject the bundled dark theme site-wide (not gated on the review page).
-   * Turbo swaps <head> on navigation, so re-add the <style> whenever it goes
-   * missing; the 2s tick keeps it in place through any later DOM churn.
+   * Inject the bundled "WaniKani Elementary Dark" userstyle site-wide (not gated
+   * on the review page), so a separate Stylus install isn't needed - the CSS is
+   * embedded in DARK_THEME_CSS above. Turbo swaps <head> on navigation, so
+   * re-add the <style> whenever it goes missing; the 2s tick keeps it in place
+   * through any later DOM churn.
    */
   function ensureDarkTheme() {
-    if (!LOAD_DARK_THEME) return;
     if (document.getElementById('wkrr-dark-theme')) return;
     const style = el('style', { id: 'wkrr-dark-theme', text: DARK_THEME_CSS });
     (document.head || document.documentElement).append(style);
@@ -3056,6 +3253,7 @@ html.wkrr-collapsed #wkrr-panel {
   }
 
   load();
+  loadCurrentLevel();
 
   window.addEventListener('didAnswerQuestion', onAnswer);
   window.addEventListener('didCompleteSubject', onComplete);
@@ -3088,6 +3286,8 @@ html.wkrr-collapsed #wkrr-panel {
     ensureDarkTheme();
     ensureUI();
     checkHourChange();
+    ensureCurrentLevel(); // picks the set up whenever you pass the dashboard
+    ensureLevelMark();
   }
 
   tick();

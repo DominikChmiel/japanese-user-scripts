@@ -74,6 +74,39 @@ customising the userstyle carries over. Item colours come from
 WaniKani and the theme define — pink/purple/blue on stock, muted red/green/slate
 on Elementary Dark.
 
+### Shift to peek — except when it would burn
+
+Holding <kbd>Shift</kbd> during a review reveals the current item's meaning and
+readings, with the half you are being asked highlighted. Releasing it hides them
+again.
+
+An item at **Enlightened** is one correct answer away from burning, which is the
+one place a peek would do real damage — so there it shows why it is withholding
+the answer instead of revealing it. Nothing of the answer is even built into the
+DOM in that case. Miss either half and the peek comes back, because a missed item
+drops an SRS stage and is no longer up for a burn.
+
+The stages come from the quiz page's own
+`data-quiz-queue-target="subjectIdsWithSRS"` payload — `[subject_id, srs_stage,
+srs_system_id]` triples — so no API token or extra request is involved.
+
+### Current-level marker
+
+The item being quizzed gets a **Level _n_** pill directly under its characters
+when it belongs to your current level — the items you are actively pushing
+through, and so the ones worth slowing down for. Items from earlier levels get
+nothing, so the pill's presence is the highlight.
+
+The quiz carries no level data anywhere — not in the subject queue, not in the
+SRS payload, not in Item Info. The dashboard's **Level Progress** widget does,
+though: it renders your level and every subject in it as
+`<a class="subject-srs-progress" href="…/radicals/charcoal">`, which is the same
+URL shape the panel's cards already link to. So the set is read off the dashboard
+as you pass through it and cached in `localStorage` under
+`wk-review-recap:current-level` until you level up. No API token, no extra
+request. The widget's Previous / Next buttons put a `level=` on its turbo-frame
+`src`, which is how browsing to another level is told apart from your own.
+
 ### On a wrong answer
 
 WaniKani's **Item Info** panel (the `F` hotkey) opens automatically, and the
@@ -83,16 +116,8 @@ just asked, leaving the reading collapsed after a missed meaning. The panel is
 only opened when it is not already open, so WaniKani's own
 "auto-open after N incorrect" setting cannot fight it.
 
-Item Info also renders at a larger font size (WaniKani's own `--font-size-*`
-scale, ×1.15, scoped to that frame).
-
-Three constants at the top of the file control this:
-
-```js
-const AUTO_OPEN_ITEM_INFO_ON_FAIL = true;
-const EXPAND_ALL_ITEM_INFO_SECTIONS = true;
-const ITEM_INFO_FONT_SCALE = 1.15;
-```
+Item Info also renders at a larger font size — WaniKani's own `--font-size-*`
+scale times `ITEM_INFO_FONT_SCALE` (1.15), scoped to that frame.
 
 ### Lesson and review counts refresh on the hour
 
@@ -109,10 +134,6 @@ global navigation). Counts that live in a lazy `<turbo-frame>` are handed to
 Turbo's own `frame.reload()` instead. If neither matches, or the re-fetched page
 comes back a different shape, nothing is touched — a stale number beats a mangled
 page. Quiz pages are skipped entirely.
-
-```js
-const AUTO_REFRESH_COUNTS = true;
-```
 
 ### How it hooks in
 
