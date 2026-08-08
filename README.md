@@ -94,6 +94,26 @@ const EXPAND_ALL_ITEM_INFO_SECTIONS = true;
 const ITEM_INFO_FONT_SCALE = 1.15;
 ```
 
+### Lesson and review counts refresh on the hour
+
+WaniKani hands out new lessons and reviews on the hour, but the counts are baked
+into the page at load time — a tab left open keeps advertising the 07:00 batch.
+When the hour turns, the page is re-fetched in the background and **only the
+count badges are swapped over**: no reload, so the scroll position, open widgets
+and Turbo cache all survive. It happens on the spot, not just when you switch
+back to the tab.
+
+Two of WaniKani's own elements are updated — `.lesson-and-review-count__count`
+(the dashboard's Lessons / Reviews pair) and `.count-bubble` (the badge in the
+global navigation). Counts that live in a lazy `<turbo-frame>` are handed to
+Turbo's own `frame.reload()` instead. If neither matches, or the re-fetched page
+comes back a different shape, nothing is touched — a stale number beats a mangled
+page. Quiz pages are skipped entirely.
+
+```js
+const AUTO_REFRESH_COUNTS = true;
+```
+
 ### How it hooks in
 
 WaniKani's review page dispatches these on `window` (verified against

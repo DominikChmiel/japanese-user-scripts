@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WaniKani Review Recap Sidebar
 // @namespace    https://github.com/dominikchmiel/review-recap-wanikani
-// @version      1.3.1
+// @version      1.4.0
 // @description  Tracks every wrong meaning/reading you type during a WaniKani review and lists the failed items - with their meanings and readings - in a sidebar next to the review.
 // @author       Dominik Chmiel
 // Match the whole site, not just the review URLs: WaniKani navigates with Turbo
@@ -53,6 +53,11 @@
   // something wrong, and expand the reading / explanation sections inside it.
   const AUTO_OPEN_ITEM_INFO_ON_FAIL = true;
   const EXPAND_ALL_ITEM_INFO_SECTIONS = true;
+
+  // WaniKani hands out new lessons and reviews on the hour, so a tab left open
+  // keeps showing a stale count. Re-fetch just those numbers when the hour turns
+  // (see the "lesson/review counts" section - no page reload involved).
+  const AUTO_REFRESH_COUNTS = true;
 
   // Item Info runs a little small - scale WaniKani's font-size scale inside it.
   const ITEM_INFO_FONT_SCALE = 1.15;
@@ -875,6 +880,83 @@
 
   function onKeyUp(event) {
     if (event.key === 'Shift') hidePeek();
+  }
+
+  // -------------------------------------------------- lesson/review counts --
+
+  /*
+   * The lesson and review counts are baked into the page when it loads, so a tab
+   * left open all morning still advertises the 07:00 batch. Rather than reload -
+   * which loses the scroll position, collapses open widgets and throws away the
+   * Turbo cache - re-fetch the page in the background and swap the count badges
+   * over on their own.
+   *
+   * The selectors are WaniKani's own: `.lesson-and-review-count__count` is the
+   * dashboard's Lessons/Reviews pair, `.count-bubble` the badge in the global
+   * navigation. If either stops matching, this quietly does nothing rather than
+   * mangling the page.
+   */
+  const COUNT_SELECTOR = '.lesson-and-review-count__count, .count-bubble';
+
+  let lastCountHour = new Date().getHours();
+
+  function countNodes(root) {
+    return [...root.querySelectorAll(COUNT_SELECTOR)];
+  }
+
+  async function fetchDocument(url) {
+    try {
+      const response = await fetch(url, {
+        credentials: 'same-origin',
+        headers: { Accept: 'text/html' },
+      });
+      if (!response.ok) return null;
+      return new DOMParser().parseFromString(await response.text(), 'text/html');
+    } catch (e) {
+      return null; /* offline, or the session expired - keep the stale numbers */
+    }
+  }
+
+  async function refreshCounts() {
+    const live = countNodes(document);
+    if (!live.length) return; // no counts on this page - nothing to do
+
+    /*
+     * A lazy <turbo-frame> is rendered empty in the outer page, so re-fetching
+     * that page would only bring its placeholder back. Turbo refills those
+     * itself; anything else we patch by hand.
+     */
+    const frames = new Set();
+    const plain = [];
+    for (const node of live) {
+      const frame = node.closest('turbo-frame[src]');
+      if (frame && typeof frame.reload === 'function') frames.add(frame);
+      else plain.push(node);
+    }
+    frames.forEach((frame) => frame.reload());
+    if (!plain.length) return;
+
+    const fresh = await fetchDocument(location.href);
+    if (!fresh) return;
+    const updated = countNodes(fresh).filter((node) => !node.closest('turbo-frame[src]'));
+
+    // Paired by position - if the page has changed shape underneath us, leave it
+    // alone rather than writing the review count into the lesson slot.
+    if (updated.length !== plain.length) return;
+    plain.forEach((node, i) => node.replaceWith(updated[i]));
+  }
+
+  /*
+   * Cheap enough to hang off the 2s tick, so the numbers turn over while you are
+   * looking at the page. The hour lives in a variable rather than localStorage -
+   * each tab patches its own DOM, so there is nothing to share between them.
+   */
+  function checkHourChange() {
+    if (!AUTO_REFRESH_COUNTS || isReviewPage()) return;
+    const hour = new Date().getHours();
+    if (hour === lastCountHour) return;
+    lastCountHour = hour;
+    refreshCounts();
   }
 
   // ------------------------------------------------------------------- css --
@@ -2995,10 +3077,17 @@ html.wkrr-collapsed #wkrr-panel {
     }
   });
 
+  // Background tabs have their timers throttled, so catch up the moment one is
+  // brought back to the front instead of waiting on the next tick.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') checkHourChange();
+  });
+
   // Site theme first, then the panel.
   function tick() {
     ensureDarkTheme();
     ensureUI();
+    checkHourChange();
   }
 
   tick();

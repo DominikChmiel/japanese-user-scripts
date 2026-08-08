@@ -278,6 +278,108 @@ for (const [label, background, expected] of [
   check(`${label} resolves to the ${expected} palette`, theme === expected, 'got ' + theme);
 }
 
+// -- lesson/review counts refresh once the hour turns ------------------------
+// WaniKani's own markup: the dashboard's Lessons/Reviews pair plus the badge in
+// the global navigation.
+const dashboardHtml = (lessons, reviews) => `<!doctype html><html><head></head><body>
+   <nav><a href="/subjects/lesson"><span class="count-bubble">${lessons}</span></a></nav>
+   <div class="lesson-and-review-count">
+     <a class="lesson-and-review-count__item" href="/subjects/lesson">
+       <span class="lesson-and-review-count__count${lessons ? '' : ' lesson-and-review-count__count--zero'}">${lessons}</span>
+       <span class="lesson-and-review-count__label">lessons</span>
+     </a>
+     <a class="lesson-and-review-count__item" href="/subjects/review">
+       <span class="lesson-and-review-count__count">${reviews}</span>
+       <span class="lesson-and-review-count__label">reviews</span>
+     </a>
+   </div>
+ </body></html>`;
+
+/**
+ * The script samples the hour at boot and only acts when it changes, so pin
+ * `getHours` before it runs and move it afterwards. `fetches` records what the
+ * script asked the server for - jsdom has no fetch of its own.
+ */
+function countProbe({ url, html, served }) {
+  const clock = { hour: 10 };
+  const fetches = [];
+  const probe = runUserscript('wanikani-review-recap.user.js', {
+    url,
+    html,
+    setup(window) {
+      window.Date.prototype.getHours = () => clock.hour;
+      window.fetch = (target, options) => {
+        fetches.push({ target, options });
+        return Promise.resolve({ ok: true, text: () => Promise.resolve(served) });
+      };
+    },
+  });
+  return { ...probe, clock, fetches };
+}
+
+const dash = countProbe({
+  url: 'https://www.wanikani.com/dashboard',
+  html: dashboardHtml(0, 12),
+  served: dashboardHtml(9, 41),
+});
+const counts = () =>
+  [...dash.window.document.querySelectorAll('.lesson-and-review-count__count, .count-bubble')].map(
+    (n) => n.textContent
+  );
+
+dash.tick();
+await flush();
+check('nothing is fetched while the hour stands still', dash.fetches.length === 0);
+check('the counts are left alone', JSON.stringify(counts()) === '["0","0","12"]', counts());
+
+dash.clock.hour = 11;
+dash.tick();
+await flush();
+check('the hour turning refetches the page', dash.fetches.length === 1, JSON.stringify(dash.fetches));
+check(
+  'the fetch carries the session cookie',
+  dash.fetches[0] && dash.fetches[0].options.credentials === 'same-origin'
+);
+check('the new counts are patched in', JSON.stringify(counts()) === '["9","9","41"]', counts());
+check(
+  'the count is no longer marked as zero',
+  !dash.window.document.querySelector('.lesson-and-review-count__count--zero')
+);
+check(
+  'the surrounding links are left untouched',
+  dash.window.document.querySelectorAll('.lesson-and-review-count__item').length === 2 &&
+    dash.window.document.querySelectorAll('.lesson-and-review-count__label').length === 2
+);
+
+dash.tick();
+await flush();
+check('it refetches once per hour, not every tick', dash.fetches.length === 1);
+
+// Nothing is reloaded or replaced when the page has changed shape underneath us.
+const shifted = countProbe({
+  url: 'https://www.wanikani.com/dashboard',
+  html: dashboardHtml(0, 12),
+  served: '<!doctype html><html><body>Please log in</body></html>',
+});
+shifted.clock.hour = 11;
+shifted.tick();
+await flush();
+check(
+  'a response without counts leaves the stale numbers in place',
+  shifted.window.document.querySelector('.lesson-and-review-count__count').textContent === '0'
+);
+
+// Mid-session there is nothing to update and a background fetch is just noise.
+const quiz = countProbe({
+  url: 'https://www.wanikani.com/subjects/review',
+  html: '<!doctype html><html><head></head><body><div class="quiz"></div></body></html>',
+  served: dashboardHtml(9, 41),
+});
+quiz.clock.hour = 11;
+quiz.tick();
+await flush();
+check('a quiz page never fetches mid-session', quiz.fetches.length === 0);
+
 const css = document.getElementById('wkrr-style').textContent;
 check('type colours defer to WaniKani/theme variables', css.includes('var(--color-kanji'));
 check('the dark palette follows the Elementary Dark variables', css.includes('--USER-surface-1'));
