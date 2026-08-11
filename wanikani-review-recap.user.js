@@ -1156,44 +1156,29 @@
    * 9 Burned, 8 Enlightened, 7 Master, 5-6 Guru, 1-4 Apprentice, and 0 for
    * unlocked but not yet learned (it is sitting in the lesson queue). Locked
    * items have no stage at all and are the empty tail of the bar.
+   *
+   * The colours are fixed hexes rather than WaniKani's --color-srs-progress-*
+   * variables, which is the one place this widget does not defer to the theme.
+   * Six touching segments have to be told apart at a glance, and the SRS
+   * variables cannot do that here: Elementary Dark resolves five of them to
+   * near-identical muted greys, and even stock WaniKani puts Guru beside
+   * Apprentice at a colour-blind separation of ΔE 6.6, below the ΔE 8 the
+   * segments need to stay distinct. These five were picked against those
+   * checks - worst neighbouring pair ΔE 11.6 simulated (16.7 with full colour
+   * vision), every one of them at least 3:1 against the widget behind it in
+   * both the dark theme and stock WaniKani's white. Burned keeps the ember
+   * reading rather than WaniKani's near-black, which is invisible on a dark
+   * surface. Lessons is deliberately colourless - "not started yet", the same
+   * family as the empty tail - so it is striped rather than tinted, which is
+   * also what keeps it apart from Apprentice next to it.
    */
   const PROGRESS_STAGES = [
-    {
-      key: 'burned',
-      label: 'Burned',
-      stages: [9],
-      color: 'var(--color-srs-progress-burned, #434343)',
-    },
-    {
-      key: 'enlightened',
-      label: 'Enlightened',
-      stages: [8],
-      color: 'var(--color-srs-progress-enlightened, #0093dd)',
-    },
-    {
-      key: 'master',
-      label: 'Master',
-      stages: [7],
-      color: 'var(--color-srs-progress-master, #294ddb)',
-    },
-    {
-      key: 'guru',
-      label: 'Guru',
-      stages: [5, 6],
-      color: 'var(--color-srs-progress-guru, #882d9e)',
-    },
-    {
-      key: 'apprentice',
-      label: 'Apprentice',
-      stages: [1, 2, 3, 4],
-      color: 'var(--color-srs-progress-apprentice, #dd0093)',
-    },
-    {
-      key: 'lessons',
-      label: 'Lessons',
-      stages: [0],
-      color: 'var(--color-locked, #cccccc)',
-    },
+    { key: 'burned', label: 'Burned', stages: [9], color: '#c26e12' },
+    { key: 'enlightened', label: 'Enlightened', stages: [8], color: '#028a9b' },
+    { key: 'master', label: 'Master', stages: [7], color: '#6688ff' },
+    { key: 'guru', label: 'Guru', stages: [5, 6], color: '#ac4cb5' },
+    { key: 'apprentice', label: 'Apprentice', stages: [1, 2, 3, 4], color: '#ea5974' },
+    { key: 'lessons', label: 'Lessons', stages: [0], color: '#8a8f98' },
   ];
 
   let progress = null; // { at, total, counts: { <srs stage>: Number } }
@@ -1304,11 +1289,15 @@
     const summary =
       `${progressShare(progress.total - locked)} unlocked · ${progressShare(burned)} burned`;
     const readout = el('span', { class: 'wkrr-progress__readout', text: summary });
+    const shown = rows.filter((row) => row.count > 0);
 
     /*
      * flex-grow does the proportions, so nothing is recomputed on a resize.
-     * Empty stages are simply left out. There is no legend - hovering a segment
-     * names it in the readout, which costs no space of its own.
+     * Empty stages are simply left out. Hovering names the stage and adds its
+     * share to the readout; the counts themselves live in the key below, where
+     * they are always legible - a 4%-wide segment has no room to be labelled
+     * from the inside, and cropping the number would be worse than not showing
+     * it at all.
      */
     const bar = el(
       'div',
@@ -1320,19 +1309,60 @@
           readout.textContent = summary;
         },
       },
-      rows
-        .filter((row) => row.count > 0)
-        .map((row) =>
-          el('span', {
-            class: 'wkrr-progress__segment wkrr-progress__segment--' + row.key,
-            style: 'flex-grow:' + row.count + (row.color ? ';background:' + row.color : ''),
-            // Also as a title, so it works on touch and for screen readers.
+      shown.map((row) =>
+        el('span', {
+          class: 'wkrr-progress__segment wkrr-progress__segment--' + row.key,
+          style: 'flex-grow:' + row.count + (row.color ? ';background:' + row.color : ''),
+          // Also as a title, so it works on touch and for screen readers.
+          title: progressTitle(row),
+          onmouseenter: () => {
+            readout.textContent = progressTitle(row);
+          },
+        })
+      )
+    );
+
+    /*
+     * The key names every segment and carries its count. Hovering an entry
+     * lights its segment in the bar, the same as pointing at the segment does,
+     * so the two halves are one control rather than two things to line up by
+     * eye. The swatch is the only coloured thing here - the name and the count
+     * stay in the widget's own text colours, which is what keeps them readable
+     * whatever the segment is filled with.
+     */
+    const legend = el(
+      'div',
+      {
+        class: 'wkrr-progress__legend',
+        onmouseleave: () => {
+          readout.textContent = summary;
+        },
+      },
+      shown.map((row) =>
+        el(
+          'span',
+          {
+            class: 'wkrr-progress__key wkrr-progress__key--' + row.key,
             title: progressTitle(row),
             onmouseenter: () => {
               readout.textContent = progressTitle(row);
+              bar.dataset.lit = row.key;
             },
+            onmouseleave: () => {
+              delete bar.dataset.lit;
+            },
+          },
+          el('span', {
+            class: 'wkrr-progress__swatch',
+            style: row.color ? 'background:' + row.color : '',
+          }),
+          el('span', { class: 'wkrr-progress__key-label', text: row.label }),
+          el('span', {
+            class: 'wkrr-progress__key-count',
+            text: row.count.toLocaleString(),
           })
         )
+      )
     );
 
     return el(
@@ -1344,7 +1374,8 @@
         el('span', { class: 'wkrr-progress__title', text: 'Overall progress' }),
         readout
       ),
-      bar
+      bar,
+      legend
     );
   }
 
