@@ -402,13 +402,40 @@ check(
 );
 
 // -- theming -----------------------------------------------------------------
-check('the panel carries a resolved theme', ['light', 'dark'].includes(panel.dataset.theme));
+// The script brings its own dark theme, so there is no light/dark to resolve at
+// runtime and nothing is stamped on the panel - the palette is dark either way.
+check('the panel takes no runtime theme stamp', panel.dataset.theme === undefined);
+check('the bundled theme is injected on the review page', !!document.getElementById('wkrr-dark-theme'));
 
-// The panel follows whatever --color-app-background the page resolves to, which
-// is what makes it track the Elementary Dark userstyle without hardcoding it.
-for (const [label, background, expected] of [
-  ['Elementary Dark', '#151515', 'dark'],
-  ['vanilla WaniKani', '#F4F4F4', 'light'],
+// It is a site theme, not a panel theme: it goes in wherever we run, including
+// the pages that never build a panel.
+const themed = runUserscript('wanikani-review-recap.user.js', {
+  url: 'https://www.wanikani.com/dashboard',
+  html: '<!doctype html><html><head></head><body><div class="dashboard"></div></body></html>',
+});
+check(
+  'and site-wide, on a page with no panel at all',
+  !!themed.window.document.getElementById('wkrr-dark-theme') &&
+    !themed.window.document.getElementById('wkrr-panel')
+);
+check(
+  'it sets the page background the rest of WaniKani is styled off',
+  themed.window.document.getElementById('wkrr-dark-theme').textContent.includes('--color-app-background')
+);
+
+// Turbo swaps <head> on navigation, which takes the <style> with it.
+themed.window.document.getElementById('wkrr-dark-theme').remove();
+themed.tick();
+check(
+  'the tick puts it back after a Turbo head swap, exactly once',
+  themed.window.document.querySelectorAll('#wkrr-dark-theme').length === 1
+);
+
+// Whatever background a page (or another userstyle) declares, the panel is
+// built the same - its palette comes from the theme's own --USER-* variables.
+for (const [label, background] of [
+  ['Elementary Dark', '#151515'],
+  ['vanilla WaniKani', '#F4F4F4'],
 ]) {
   const probe = runUserscript('wanikani-review-recap.user.js', {
     url: 'https://www.wanikani.com/subjects/review',
@@ -417,8 +444,8 @@ for (const [label, background, expected] of [
   });
   await flush();
   probe.tick();
-  const theme = probe.window.document.getElementById('wkrr-panel').dataset.theme;
-  check(`${label} resolves to the ${expected} palette`, theme === expected, 'got ' + theme);
+  const built = probe.window.document.getElementById('wkrr-panel');
+  check(`on ${label} the panel is built with the one dark palette`, !!built && !built.dataset.theme);
 }
 
 // -- lesson/review counts refresh once the hour turns ------------------------
