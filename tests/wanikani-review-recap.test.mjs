@@ -523,6 +523,183 @@ quiz.tick();
 await flush();
 check('a quiz page never fetches mid-session', quiz.fetches.length === 0);
 
+// -- overall progress widget -------------------------------------------------
+// wkof hands back one entry per subject with its assignment attached. An
+// assignment that has never unlocked counts as locked, same as having none.
+const PROGRESS_KEY = 'wk-review-recap:progress';
+const atStage = (stage, count) =>
+  Array.from({ length: count }, (_, i) => ({
+    id: stage * 1000 + i,
+    data: { hidden_at: null },
+    assignments: { srs_stage: stage, unlocked_at: '2020-01-01T00:00:00.000Z' },
+  }));
+
+const wkofItems = [
+  ...Array.from({ length: 5 }, (_, i) => ({ id: 90000 + i, data: { hidden_at: null } })),
+  ...Array.from({ length: 2 }, (_, i) => ({
+    id: 91000 + i,
+    data: { hidden_at: null },
+    assignments: { srs_stage: 0, unlocked_at: null },
+  })),
+  ...atStage(0, 3), // lessons
+  ...atStage(1, 4), ...atStage(2, 3), ...atStage(3, 2), ...atStage(4, 1), // apprentice: 10
+  ...atStage(5, 4), ...atStage(6, 2), // guru: 6
+  ...atStage(7, 4), // master
+  ...atStage(8, 8), // enlightened
+  ...atStage(9, 12), // burned
+]; // 50 subjects, 7 of them locked
+
+const DASHBOARD = `<!doctype html><html><head></head><body>
+   <div class="dashboard"><div class="dashboard__content" data-controller="dashboard">
+     <div class="dashboard__row" id="wk-own-row">
+       <div class="dashboard__widget dashboard__widget--one-third"></div>
+     </div>
+   </div></div>
+ </body></html>`;
+
+// The fixture above is a stand-in - check its anchor against the real dashboard.
+check(
+  'the container the widget hooks onto is WaniKani\'s own',
+  (dashboardSnapshot.match(/class="dashboard__content"/g) || []).length === 1
+);
+
+function progressProbe({ items, cached, url = 'https://www.wanikani.com/dashboard', html = DASHBOARD }) {
+  const asked = [];
+  const probe = runUserscript('wanikani-review-recap.user.js', {
+    url,
+    html,
+    setup(window) {
+      if (cached) window.localStorage.setItem(PROGRESS_KEY, JSON.stringify(cached));
+      if (!items) return;
+      window.wkof = {
+        include: (module) => asked.push(module),
+        ready: () => Promise.resolve(),
+        ItemData: {
+          get_items: (config) => {
+            asked.push(config);
+            return Promise.resolve(items);
+          },
+        },
+      };
+    },
+  });
+  return { ...probe, asked };
+}
+
+const bars = progressProbe({ items: wkofItems });
+await flush();
+const widget = bars.window.document.querySelector('.wkrr-progress');
+check('the progress widget is built from wkof', !!widget);
+check(
+  'it asks wkof for the item data with assignments',
+  bars.asked.join(',') === 'ItemData,assignments',
+  JSON.stringify(bars.asked)
+);
+check('its stylesheet is injected', !!bars.window.document.getElementById('wkrr-progress-style'));
+
+const readoutOf = (probe) =>
+  probe.window.document.querySelector('.wkrr-progress__readout').textContent;
+check(
+  'unlocked leads the readout, burned follows',
+  readoutOf(bars) === '86.0% unlocked · 24.0% burned',
+  readoutOf(bars)
+);
+check('no counts are on show until you ask for them', !/\b12\b/.test(widget.textContent), widget.textContent);
+
+const segments = [...bars.window.document.querySelectorAll('.wkrr-progress__segment')];
+check(
+  'the bar fills from the left, furthest along first',
+  segments.map((s) => s.className.replace(/.*--/, '')).join(',') ===
+    'burned,enlightened,master,guru,apprentice,lessons,locked',
+  segments.map((s) => s.className)
+);
+check(
+  'each segment is sized by its item count',
+  segments.map((s) => s.style.flexGrow).join(',') === '12,8,4,6,10,3,7',
+  segments.map((s) => s.style.flexGrow)
+);
+check(
+  'the locked share is the empty tail of the track, not a coloured segment',
+  segments[6].classList.contains('wkrr-progress__segment--locked') && !segments[6].style.background
+);
+check(
+  'stage colours defer to WaniKani/theme variables',
+  segments[0].style.background.includes('--color-srs-progress-burned'),
+  segments[0].style.background
+);
+
+// Hovering a segment is the only way the counts are shown, so it has to work.
+const hover = (node, type) => node.dispatchEvent(new bars.window.MouseEvent(type));
+hover(segments[3], 'mouseenter');
+check('hovering a segment names it and counts it', readoutOf(bars) === 'Guru - 6 of 50 (12.0%)', readoutOf(bars));
+check('...and is spelled out as a title too', segments[3].title === 'Guru - 6 of 50 (12.0%)', segments[3].title);
+hover(segments[6], 'mouseenter');
+check('the empty tail reports what is still locked', readoutOf(bars) === 'Locked - 7 of 50 (14.0%)', readoutOf(bars));
+hover(bars.window.document.querySelector('.wkrr-progress__bar'), 'mouseleave');
+check('leaving the bar puts the summary back', readoutOf(bars) === '86.0% unlocked · 24.0% burned');
+
+check(
+  'it sits at the top of the dashboard, above WaniKani\'s own rows',
+  bars.window.document.querySelector('.dashboard__content').firstElementChild.id === 'wkrr-progress'
+);
+check(
+  'it spans the full width rather than sharing a row',
+  !!bars.window.document.querySelector('#wkrr-progress .dashboard__widget--full')
+);
+check("WaniKani's own row is left alone", !!bars.window.document.getElementById('wk-own-row'));
+
+const cachedProgress = JSON.parse(bars.window.localStorage.getItem(PROGRESS_KEY) || 'null');
+check('the tally is cached for the next page load', cachedProgress && cachedProgress.total === 50, cachedProgress);
+
+widget.dataset.probe = 'built-once';
+bars.tick();
+await flush();
+check(
+  'the tick neither duplicates nor rebuilds an unchanged bar',
+  bars.window.document.querySelectorAll('#wkrr-progress').length === 1 &&
+    bars.window.document.querySelector('.wkrr-progress').dataset.probe === 'built-once'
+);
+check('and it does not re-ask wkof', bars.asked.filter((a) => a === 'assignments').length === 1);
+
+// A stage can legitimately be empty, and an empty segment would still take up
+// its 3px minimum - so it has to be left out of the bar entirely.
+const empty = progressProbe({
+  items: [...Array.from({ length: 3 }, (_, i) => ({ id: i, data: { hidden_at: null } })), ...atStage(9, 1)],
+});
+await flush();
+check(
+  'stages with nothing in them take no room in the bar',
+  [...empty.window.document.querySelectorAll('.wkrr-progress__segment')]
+    .map((s) => s.className.replace(/.*--/, ''))
+    .join(',') === 'burned,locked'
+);
+
+// The cache is what makes the bar paint before wkof has answered.
+const fromCache = progressProbe({
+  items: null,
+  cached: { at: Date.now(), total: 50, counts: { '-1': 38, 9: 12 } },
+});
+check(
+  'a cached tally renders without wkof',
+  readoutOf(fromCache) === '24.0% unlocked · 24.0% burned',
+  readoutOf(fromCache)
+);
+
+const noWkof = progressProbe({ items: null });
+check('no wkof and no cache means no widget', !noWkof.window.document.getElementById('wkrr-progress'));
+
+const quizPage = progressProbe({
+  items: wkofItems,
+  cached: { at: Date.now(), total: 50, counts: { 9: 12 } },
+  url: 'https://www.wanikani.com/subjects/review',
+  html: '<!doctype html><html><head></head><body><div class="quiz"></div></body></html>',
+});
+await flush();
+check(
+  'the widget stays on the dashboard',
+  !quizPage.window.document.getElementById('wkrr-progress') && quizPage.asked.length === 0
+);
+
 const css = document.getElementById('wkrr-style').textContent;
 check('type colours defer to WaniKani/theme variables', css.includes('var(--color-kanji'));
 check('the dark palette follows the Elementary Dark variables', css.includes('--USER-surface-1'));

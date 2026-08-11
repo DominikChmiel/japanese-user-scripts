@@ -107,6 +107,39 @@ as you pass through it and cached in `localStorage` under
 request. The widget's Previous / Next buttons put a `level=` on its turbo-frame
 `src`, which is how browsing to another level is told apart from your own.
 
+### Overall progress bar on the dashboard
+
+A slim bar across the top of the dashboard, stacked by SRS stage, for the whole
+of WaniKani. Its full width is a completed set — every subject burned — so the
+coloured part is how far along you actually are, and the grey tail is what is
+still locked. It fills from the left, furthest along first: **Burned /
+Enlightened / Master / Guru / Apprentice / Lessons**, then the locked remainder.
+
+Two numbers sit on the right: how much of WaniKani you have **unlocked**, then
+how much of it has **burned**. Nothing else is on show — hover a segment and the
+rest dim while that line becomes `Guru — 1,122 of 9,971 (11.3%)`, so the counts
+cost no space of their own. The same text is on each segment as a `title`, so it
+still works on touch and with a screen reader.
+
+WaniKani's own dashboard cannot answer this. Its **Active Item Spread** widget
+stops at Enlightened, there is no burned count anywhere on the page, and nothing
+states how many subjects WaniKani has in total. Both of those live behind the
+API, so this one feature builds on
+[WaniKani Open Framework](https://github.com/rfindley/wanikani-open-framework)
+instead:
+`wkof.ItemData.get_items('assignments')` already holds every subject and
+assignment in IndexedDB, which makes the counts exact and normally costs no
+request. The tally is cached in `localStorage` under `wk-review-recap:progress`
+so the bar paints immediately on the next load, and refreshed at most every ten
+minutes.
+
+**This is the one part of the script with an outside dependency.** Without wkof
+installed the widget simply never appears; everything else works untouched.
+
+Colours come from `--color-srs-progress-*` where the page defines them (the dark
+theme below does), falling back to WaniKani's classic pink/purple/blue/burnt
+palette.
+
 ### On a wrong answer
 
 WaniKani's **Item Info** panel (the `F` hotkey) opens automatically, and the

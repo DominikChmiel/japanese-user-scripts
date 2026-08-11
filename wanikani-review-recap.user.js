@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WaniKani Review Recap Sidebar
 // @namespace    https://github.com/dominikchmiel/review-recap-wanikani
-// @version      1.4.0
+// @version      1.5.0
 // @description  Tracks every wrong meaning/reading you type during a WaniKani review and lists the failed items - with their meanings and readings - in a sidebar next to the review.
 // @author       Dominik Chmiel
 // Match the whole site, not just the review URLs: WaniKani navigates with Turbo
@@ -1132,6 +1132,255 @@
     anchor.after(el('div', { id: 'wkrr-level', text }));
   }
 
+  // ------------------------------------------------------ overall progress --
+
+  /*
+   * A slim bar across the dashboard for the whole of WaniKani - every subject
+   * grouped by SRS stage, with the full width standing for a completed set,
+   * i.e. everything burned. The counts stay out of the way until you hover a
+   * segment, so the whole thing costs two lines.
+   *
+   * The dashboard cannot answer that on its own. Its "Active Item Spread"
+   * widget stops at Enlightened, there is no burned count anywhere on the page,
+   * and nothing states how many subjects WaniKani has in total. Both of those
+   * live behind the API, so this builds on WaniKani Open Framework instead:
+   * wkof already holds every subject and assignment in IndexedDB, which makes
+   * the counts exact and normally free. Without wkof the widget never appears.
+   */
+  const PROGRESS_STORAGE_KEY = 'wk-review-recap:progress';
+  const PROGRESS_MAX_AGE_MS = 10 * 60 * 1000; // how often to re-ask wkof
+
+  /*
+   * Left to right along the bar, furthest along first, so it fills from the
+   * left the way a progress bar should. The numbers are WaniKani's own stages:
+   * 9 Burned, 8 Enlightened, 7 Master, 5-6 Guru, 1-4 Apprentice, and 0 for
+   * unlocked but not yet learned (it is sitting in the lesson queue). Locked
+   * items have no stage at all and are the empty tail of the bar.
+   */
+  const PROGRESS_STAGES = [
+    {
+      key: 'burned',
+      label: 'Burned',
+      stages: [9],
+      color: 'var(--color-srs-progress-burned, #434343)',
+    },
+    {
+      key: 'enlightened',
+      label: 'Enlightened',
+      stages: [8],
+      color: 'var(--color-srs-progress-enlightened, #0093dd)',
+    },
+    {
+      key: 'master',
+      label: 'Master',
+      stages: [7],
+      color: 'var(--color-srs-progress-master, #294ddb)',
+    },
+    {
+      key: 'guru',
+      label: 'Guru',
+      stages: [5, 6],
+      color: 'var(--color-srs-progress-guru, #882d9e)',
+    },
+    {
+      key: 'apprentice',
+      label: 'Apprentice',
+      stages: [1, 2, 3, 4],
+      color: 'var(--color-srs-progress-apprentice, #dd0093)',
+    },
+    {
+      key: 'lessons',
+      label: 'Lessons',
+      stages: [0],
+      color: 'var(--color-locked, #cccccc)',
+    },
+  ];
+
+  let progress = null; // { at, total, counts: { <srs stage>: Number } }
+  let progressAskedAt = 0;
+
+  function loadProgress() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(PROGRESS_STORAGE_KEY) || 'null');
+      if (parsed && parsed.total > 0 && parsed.counts) progress = parsed;
+    } catch (e) {
+      /* corrupt or unavailable storage - the widget waits for wkof instead */
+    }
+  }
+
+  function saveProgress() {
+    try {
+      localStorage.setItem(PROGRESS_STORAGE_KEY, JSON.stringify(progress));
+    } catch (e) {
+      /* quota / private mode - it still renders for this page load */
+    }
+  }
+
+  /*
+   * wkof hands back one entry per subject with its assignment attached, if it
+   * has one. An assignment without unlocked_at has not been reached yet, which
+   * is the same as having none - both count as locked, exactly how wkof's own
+   * srs_stage index treats them.
+   */
+  function tallyProgress(items) {
+    const counts = {};
+    let total = 0;
+    for (const item of items || []) {
+      if (!item || !item.data) continue;
+      total++;
+      const assignment = item.assignments;
+      const stage = assignment && assignment.unlocked_at ? assignment.srs_stage : -1;
+      counts[stage] = (counts[stage] || 0) + 1;
+    }
+    return total ? { at: Date.now(), total, counts } : null;
+  }
+
+  /*
+   * Runs off the tick: wkof may well load after us, and the dashboard is the
+   * only place the numbers are shown. The timestamp gates both outcomes, so a
+   * missing API key costs one attempt every PROGRESS_MAX_AGE_MS rather than one
+   * per tick.
+   */
+  function refreshProgress() {
+    const wkof = window.wkof;
+    if (!dashboardContent() || !wkof || typeof wkof.include !== 'function') return;
+    const last = Math.max(progressAskedAt, progress ? progress.at : 0);
+    if (Date.now() - last < PROGRESS_MAX_AGE_MS) return;
+    progressAskedAt = Date.now();
+
+    try {
+      wkof.include('ItemData');
+      wkof
+        .ready('ItemData')
+        .then(() => wkof.ItemData.get_items('assignments'))
+        .then((items) => {
+          const tally = tallyProgress(items);
+          if (!tally) return;
+          progress = tally;
+          saveProgress();
+          ensureProgressWidget();
+        })
+        .catch(() => {
+          /* no API key, or wkof never became ready - leave the widget as is */
+        });
+    } catch (e) {
+      /* wkof present but not the version we expect */
+    }
+  }
+
+  /** Every segment of the bar, left to right, with the locked remainder last. */
+  function progressRows() {
+    const rows = PROGRESS_STAGES.map((stage) => ({
+      key: stage.key,
+      label: stage.label,
+      color: stage.color,
+      count: stage.stages.reduce((sum, n) => sum + (progress.counts[n] || 0), 0),
+    }));
+    const placed = rows.reduce((sum, row) => sum + row.count, 0);
+    // No colour: the locked share is the empty tail of the track, not a segment.
+    rows.push({
+      key: 'locked',
+      label: 'Locked',
+      color: '',
+      count: Math.max(0, progress.total - placed),
+    });
+    return rows;
+  }
+
+  function progressShare(count) {
+    return ((count / progress.total) * 100).toFixed(1) + '%';
+  }
+
+  function progressTitle(row) {
+    const of = `${row.count.toLocaleString()} of ${progress.total.toLocaleString()}`;
+    return `${row.label} - ${of} (${progressShare(row.count)})`;
+  }
+
+  function buildProgress() {
+    const rows = progressRows();
+    const burned = rows.find((row) => row.key === 'burned').count;
+    const locked = rows.find((row) => row.key === 'locked').count;
+    // How far into WaniKani you have got, then how much of it has stuck.
+    const summary =
+      `${progressShare(progress.total - locked)} unlocked · ${progressShare(burned)} burned`;
+    const readout = el('span', { class: 'wkrr-progress__readout', text: summary });
+
+    /*
+     * flex-grow does the proportions, so nothing is recomputed on a resize.
+     * Empty stages are simply left out. There is no legend - hovering a segment
+     * names it in the readout, which costs no space of its own.
+     */
+    const bar = el(
+      'div',
+      {
+        class: 'wkrr-progress__bar',
+        role: 'img',
+        'aria-label': summary,
+        onmouseleave: () => {
+          readout.textContent = summary;
+        },
+      },
+      rows
+        .filter((row) => row.count > 0)
+        .map((row) =>
+          el('span', {
+            class: 'wkrr-progress__segment wkrr-progress__segment--' + row.key,
+            style: 'flex-grow:' + row.count + (row.color ? ';background:' + row.color : ''),
+            // Also as a title, so it works on touch and for screen readers.
+            title: progressTitle(row),
+            onmouseenter: () => {
+              readout.textContent = progressTitle(row);
+            },
+          })
+        )
+    );
+
+    return el(
+      'div',
+      { class: 'wkrr-progress' },
+      el(
+        'div',
+        { class: 'wkrr-progress__head' },
+        el('span', { class: 'wkrr-progress__title', text: 'Overall progress' }),
+        readout
+      ),
+      bar
+    );
+  }
+
+  function dashboardContent() {
+    return document.querySelector('.dashboard__content');
+  }
+
+  /*
+   * The dashboard lays widgets out as flex rows, so ours gets a full-width row
+   * of its own at the top rather than being squeezed into one of WaniKani's and
+   * reflowing it. Turbo swaps <body> on navigation, hence the rebuild-if-
+   * missing; the data stamp keeps the tick from re-rendering an unchanged bar.
+   */
+  function ensureProgressWidget() {
+    const content = dashboardContent();
+    const existing = document.getElementById('wkrr-progress');
+    if (!content || !progress) {
+      if (existing) existing.remove();
+      return;
+    }
+    if (existing && existing.dataset.at === String(progress.at)) return;
+
+    if (!document.getElementById('wkrr-progress-style')) {
+      (document.head || document.documentElement).append(
+        el('style', { id: 'wkrr-progress-style', text: PROGRESS_CSS })
+      );
+    }
+
+    const row = existing || el('div', { id: 'wkrr-progress', class: 'dashboard__row' });
+    row.dataset.at = String(progress.at);
+    row.replaceChildren(
+      el('div', { class: 'dashboard__widget dashboard__widget--full' }, buildProgress())
+    );
+    if (row.parentElement !== content) content.prepend(row);
+  }
+
   // ------------------------------------------------------------------- css --
 
   const scaled = (name) => Math.round(WK_FONT_SIZES[name] * ITEM_INFO_FONT_SCALE);
@@ -1386,6 +1635,53 @@ html.wkrr-collapsed #wkrr-panel {
   color: var(--color-srs-progress-enlightened, #0093dd);
 }
 .wkrr-peek__blocked-text { font-size: 13px; line-height: 1.45; color: var(--wkrr-muted); }
+`;
+
+  /*
+   * The overall-progress widget, injected on the dashboard rather than the
+   * review, so it is styled off WaniKani's widget and SRS variables instead of
+   * the panel's palette - that way it looks native on stock WaniKani and picks
+   * up Elementary Dark's colours when the theme above is active. The fallbacks
+   * are WaniKani's classic SRS palette, for when neither defines them.
+   */
+  const PROGRESS_CSS = `
+.wkrr-progress {
+  display: flex; flex-direction: column; gap: 7px;
+  padding: var(--spacing-tight, 12px) var(--spacing-normal, 16px);
+  background-color: var(--color-widget-background, #ffffff);
+  border: 1px solid var(--color-widget-border, #cad0d6);
+  border-radius: var(--border-radius-widget, 16px);
+  color: var(--color-widget-primary-text, #333333);
+  font-family: var(--font-family-default, "Noto Sans", Helvetica, Arial, sans-serif);
+  font-size: 13px;
+  box-sizing: border-box;
+}
+.wkrr-progress *, .wkrr-progress *::before, .wkrr-progress *::after { box-sizing: border-box; }
+
+.wkrr-progress__head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+}
+.wkrr-progress__title { font-weight: var(--font-weight-heavy, 700); }
+/* Swapped for the hovered segment's numbers, so it must not resize the row. */
+.wkrr-progress__readout {
+  min-height: 1.4em; text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-widget-secondary-text, #6b7079);
+}
+
+/* Fills from the left: burned first, and the locked share is the empty tail. */
+.wkrr-progress__bar {
+  display: flex; height: 12px;
+  border-radius: 999px; overflow: hidden;
+  background: color-mix(in srgb, var(--color-locked, #cccccc), transparent 55%);
+  box-shadow: inset 0 0 0 1px var(--color-widget-border, #cad0d6);
+}
+/* A stage can be a handful of items out of thousands - keep it from vanishing. */
+.wkrr-progress__segment { flex-basis: 0; min-width: 3px; }
+.wkrr-progress__segment--locked { min-width: 0; }
+/* Dim the rest while pointing at one, so the readout has an obvious subject. */
+.wkrr-progress__bar:hover .wkrr-progress__segment { opacity: .45; }
+.wkrr-progress__bar .wkrr-progress__segment:hover { opacity: 1; }
 `;
 
   /*
@@ -3254,6 +3550,7 @@ html.wkrr-collapsed #wkrr-panel {
 
   load();
   loadCurrentLevel();
+  loadProgress();
 
   window.addEventListener('didAnswerQuestion', onAnswer);
   window.addEventListener('didCompleteSubject', onComplete);
@@ -3288,6 +3585,8 @@ html.wkrr-collapsed #wkrr-panel {
     checkHourChange();
     ensureCurrentLevel(); // picks the set up whenever you pass the dashboard
     ensureLevelMark();
+    refreshProgress();
+    ensureProgressWidget();
   }
 
   tick();
