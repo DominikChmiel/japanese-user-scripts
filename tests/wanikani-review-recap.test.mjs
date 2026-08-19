@@ -631,7 +631,11 @@ check(
   readoutOf(bars) === '86.0% unlocked · 24.0% burned',
   readoutOf(bars)
 );
-check('no counts are on show until you ask for them', !/\b12\b/.test(widget.textContent), widget.textContent);
+const progressCss = bars.window.document.getElementById('wkrr-progress-style').textContent;
+const barHeight = Number(
+  (progressCss.match(/\.wkrr-progress__bar \{[^}]*height: (\d+)px/) || [])[1]
+);
+check('the bar is thick enough to read as a bar', barHeight >= 16, barHeight);
 
 const segments = [...bars.window.document.querySelectorAll('.wkrr-progress__segment')];
 check(
@@ -649,10 +653,37 @@ check(
   'the locked share is the empty tail of the track, not a coloured segment',
   segments[6].classList.contains('wkrr-progress__segment--locked') && !segments[6].style.background
 );
+/*
+ * The stage colours are the one thing here that does not defer to the theme:
+ * Elementary Dark resolves five of the --color-srs-progress-* variables to
+ * near-identical greys, so the widget ships a set that was checked instead -
+ * worst neighbouring pair ΔE 11.6 under simulated colour blindness (16.7 with
+ * full colour vision), each at least 3:1 against both the dark widget and
+ * stock WaniKani's white. Pinned so that changing one has to go back through
+ * those checks.
+ */
+const PALETTE = {
+  burned: 'rgb(194, 110, 18)',
+  enlightened: 'rgb(2, 138, 155)',
+  master: 'rgb(102, 136, 255)',
+  guru: 'rgb(172, 76, 181)',
+  apprentice: 'rgb(234, 89, 116)',
+  lessons: 'rgb(138, 143, 152)',
+};
 check(
-  'stage colours defer to WaniKani/theme variables',
-  segments[0].style.background.includes('--color-srs-progress-burned'),
-  segments[0].style.background
+  'the stage colours are the checked set, not the theme greys',
+  segments
+    .slice(0, 6)
+    .every((s) => s.style.backgroundColor === PALETTE[s.className.replace(/.*--/, '')]),
+  segments.map((s) => s.style.backgroundColor)
+);
+// Lessons is "not started", so it is striped rather than tinted - and the
+// stripes come from the stylesheet, which the background shorthand would drop.
+check(
+  'the Lessons segment is striped on top of its fill',
+  /\.wkrr-progress__segment--lessons[^{]*\{[^}]*repeating-linear-gradient/.test(progressCss) &&
+    !/;background:/.test(segments[5].getAttribute('style')),
+  segments[5].getAttribute('style')
 );
 
 // Hovering a segment is the only way the counts are shown, so it has to work.
@@ -664,6 +695,51 @@ hover(segments[6], 'mouseenter');
 check('the empty tail reports what is still locked', readoutOf(bars) === 'Locked - 7 of 50 (14.0%)', readoutOf(bars));
 hover(bars.window.document.querySelector('.wkrr-progress__bar'), 'mouseleave');
 check('leaving the bar puts the summary back', readoutOf(bars) === '86.0% unlocked · 24.0% burned');
+
+// The key is where the counts live: a 4%-wide segment has no room for its own
+// number, so every stage is named and counted underneath the bar instead.
+const keys = [...bars.window.document.querySelectorAll('.wkrr-progress__key')];
+const keyText = keys.map(
+  (k) =>
+    k.querySelector('.wkrr-progress__key-label').textContent +
+    ' ' +
+    k.querySelector('.wkrr-progress__key-count').textContent
+);
+check(
+  'every segment is labelled with its count, in bar order',
+  keyText.join(', ') ===
+    'Burned 12, Enlightened 8, Master 4, Guru 6, Apprentice 10, Lessons 3, Locked 7',
+  keyText
+);
+check(
+  'each entry wears its own segment\'s colour',
+  keys.every(
+    (k, i) =>
+      k.querySelector('.wkrr-progress__swatch').style.backgroundColor ===
+      segments[i].style.backgroundColor
+  ),
+  keys.map((k) => k.querySelector('.wkrr-progress__swatch').style.backgroundColor)
+);
+
+// Pointing at an entry has to reach into the bar, or the two halves are just
+// two lists to line up by eye.
+const bar = bars.window.document.querySelector('.wkrr-progress__bar');
+hover(keys[2], 'mouseenter');
+check(
+  'hovering an entry lights its segment and reads it out',
+  segments[2].classList.contains('wkrr-progress__segment--lit') &&
+    bar.classList.contains('wkrr-progress__bar--pointed') &&
+    readoutOf(bars) === 'Master - 4 of 50 (8.0%)',
+  readoutOf(bars)
+);
+hover(keys[2], 'mouseleave');
+check(
+  'and the rest of the bar comes back up when you leave',
+  !segments[2].classList.contains('wkrr-progress__segment--lit') &&
+    !bar.classList.contains('wkrr-progress__bar--pointed')
+);
+hover(bars.window.document.querySelector('.wkrr-progress__legend'), 'mouseleave');
+check('leaving the key puts the summary back too', readoutOf(bars) === '86.0% unlocked · 24.0% burned');
 
 check(
   'it sits at the top of the dashboard, above WaniKani\'s own rows',
@@ -699,6 +775,12 @@ check(
   [...empty.window.document.querySelectorAll('.wkrr-progress__segment')]
     .map((s) => s.className.replace(/.*--/, ''))
     .join(',') === 'burned,locked'
+);
+check(
+  '...and none in the key either',
+  [...empty.window.document.querySelectorAll('.wkrr-progress__key-label')]
+    .map((k) => k.textContent)
+    .join(',') === 'Burned,Locked'
 );
 
 // The cache is what makes the bar paint before wkof has answered.
