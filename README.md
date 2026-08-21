@@ -80,9 +80,10 @@ on Elementary Dark.
 
 ### Shift to peek — except when it would burn
 
-Holding <kbd>Shift</kbd> during a review reveals the current item's meaning and
+Holding <kbd>Shift</kbd> during a quiz reveals the current item's meaning and
 readings, with the half you are being asked highlighted. Releasing it hides them
-again.
+again. This — and the panel, and the level marker — runs on reviews, extra study
+and **lesson quizzes** alike; see [Which pages count as a quiz](#which-pages-count-as-a-quiz).
 
 An item at **Enlightened** is one correct answer away from burning, which is the
 one place a peek would do real damage — so there it shows why it is withholding
@@ -199,6 +200,57 @@ alongside the hour, not instead of it, so midnight — which moves both — make
 pass rather than two; a timezone change or the repeated DST hour can move the
 date without moving the hour, so neither is assumed from the other.
 
+### Which pages count as a quiz
+
+The script runs site-wide, so the panel, the peek and the level marker all gate
+on the URL. WaniKani moved lessons out from under `/subjects` at some point, and
+the quiz at the end of a lesson went with them:
+
+| | |
+| --- | --- |
+| `/subjects/review` | reviews |
+| `/subjects/extra_study` | extra study |
+| `/subject-lessons/<session>/quiz` | the quiz at the end of a lesson |
+
+Matching only the old `/subjects/lesson/quiz` meant the recap, the peek and the
+level marker were all silently switched off for every lesson. That path is still
+matched too — one extra regex is cheap next to quietly doing nothing again for
+anyone served an older URL.
+
+The lesson *slides* (`/subject-lessons/<session>/<subject>`) are deliberately not
+a quiz: there is nothing to get wrong there, and the meaning is already on screen.
+
+### Two of WaniKani's own widgets, unfolded
+
+Both of these widgets keep something one click away that is really what you
+opened the widget to see. Both are handled the same way — the content is
+**cloned**, never moved, so WaniKani's own click-through still works exactly as
+it did and nothing it owns is rearranged. Each copy is stamped with the id of the
+panel it came from; those ids are regenerated whenever the turbo-frame
+re-renders, which is what stops the 2s tick from rebuilding an unchanged copy and
+what makes a stale one rebuild itself.
+
+**Next 24 Hours** lists a day per row and hides each day's hourly breakdown
+behind `detail#showDetail`, which slides a panel in over the list. Today's hours
+are the ones you plan around, so they are shown in place — indented under today's
+row, above tomorrow's. Only the *first* row is considered, and only if its title
+is today's weekday: the widget is chronological, so a day with nothing left in it
+simply is not listed, and matching by name further down would eventually match
+the same weekday a week out. The cloned container keeps WaniKani's own
+`--max-title-characters` / `--max-count-characters`, which is what keeps the
+hour, bar and count columns lined up.
+
+**Level Progress** summarises the level as three cards — Radicals, Kanji,
+Vocabulary — each hiding its items behind a "See All". The radicals and the kanji
+are embedded under the cards instead, each with the Guru'd count the card itself
+shows. **Vocabulary stays one click away**: a level carries a hundred or more,
+which would bury the rest of the widget, and unlike the other two it is never
+what gates the level-up. The grid is WaniKani's own minus the `flex: 1 1 0` that
+only makes sense inside the sliding panel, and it grows with its contents up to
+**300px** — a level's radicals never reach that, its kanji can, and past it the
+widget would push everything below it off the screen. `overflow-y: auto` rather
+than WaniKani's `scroll`, so a group that fits shows no gutter at all.
+
 ### How it hooks in
 
 WaniKani's review page dispatches these on `window` (verified against
@@ -311,6 +363,8 @@ first, so a stale bundle can never be what the suite is testing.
 | `counts.ts` | The hourly count refresh and the midnight lesson rollover. |
 | `level.ts` | The current-level marker under the character. |
 | `progress.ts` | The dashboard's overall-progress bar (needs wkof). |
+| `forecast.ts` | Today's hours, unfolded into the Next 24 Hours widget. |
+| `level-progress.ts` | Radicals and kanji, embedded in the Level Progress widget. |
 | `styles/*.css.ts` | The three stylesheets, as tagged template literals. |
 
 `bunpro-mistake-recap.user.js` is a single file and is not built — it is edited

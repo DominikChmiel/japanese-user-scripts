@@ -11,6 +11,16 @@ export interface ElAttrs {
   [name: string]: string | number | boolean | EventListener | null | undefined;
 }
 
+/**
+ * Injects a stylesheet once. Turbo prunes our <style>s out of <head> when it
+ * swaps pages, so every caller re-asserts this off the tick rather than
+ * trusting that it stayed.
+ */
+export function ensureStyle(id: string, css: string) {
+  if (document.getElementById(id)) return;
+  (document.head || document.documentElement).append(el('style', { id, text: css }));
+}
+
 export function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
   attrs?: ElAttrs | null,

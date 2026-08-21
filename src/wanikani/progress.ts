@@ -11,7 +11,7 @@
  * wkof already holds every subject and assignment in IndexedDB, which makes
  * the counts exact and normally free. Without wkof the widget never appears.
  */
-import { el } from './dom';
+import { el, ensureStyle } from './dom';
 import { PROGRESS_CSS } from './styles/progress.css';
 import type { ProgressRow, ProgressTally, WkofItem } from './types';
 const PROGRESS_STORAGE_KEY = 'wk-review-recap:progress';
@@ -277,11 +277,7 @@ export function ensureProgressWidget() {
   }
   if (existing && existing.dataset.at === String(tally.at)) return;
 
-  if (!document.getElementById('wkrr-progress-style')) {
-    (document.head || document.documentElement).append(
-      el('style', { id: 'wkrr-progress-style', text: PROGRESS_CSS })
-    );
-  }
+  ensureStyle('wkrr-progress-style', PROGRESS_CSS);
 
   const row = existing || el('div', { id: 'wkrr-progress', class: 'dashboard__row' });
   row.dataset.at = String(tally.at);

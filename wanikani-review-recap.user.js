@@ -133,6 +133,10 @@
   }
 
   // src/wanikani/dom.ts
+  function ensureStyle(id, css) {
+    if (document.getElementById(id)) return;
+    (document.head || document.documentElement).append(el("style", { id, text: css }));
+  }
   function el(tag, attrs, ...children) {
     const node = document.createElement(tag);
     if (attrs) {
@@ -543,7 +547,7 @@
   function isReviewUrl(url) {
     try {
       const path = new URL(url, location.href).pathname;
-      return /^\/subjects\/(review|extra_study)(\/|$)/.test(path) || /^\/subjects\/lesson\/quiz(\/|$)/.test(path);
+      return /^\/subjects\/(review|extra_study)(\/|$)/.test(path) || /^\/subject-lessons\/[^/]+\/quiz(\/|$)/.test(path) || /^\/subjects\/lesson\/quiz(\/|$)/.test(path);
     } catch (e) {
       return false;
     }
@@ -926,6 +930,181 @@
     ensureLevelMark();
   }
 
+  // src/wanikani/styles/widgets.css.ts
+  var WIDGET_CSS = `
+/*
+ * Today's hourly breakdown, lifted out of the Next 24 Hours widget's slide-in
+ * detail panel and shown under today's row. Indented and tied to the row above
+ * with a rule down the left, so it reads as a breakdown of that row rather
+ * than as more days. The cloned container keeps WaniKani's own
+ * --max-title-characters / --max-count-characters, which is what keeps the
+ * hour, bar and count columns lined up with each other.
+ */
+.wkrr-forecast-hours {
+  margin: 2px 0 6px calc(var(--spacing-normal, 16px) + 1ch);
+  padding-left: var(--spacing-tight, 12px);
+  border-left: 2px solid var(--color-review-forecast-bar-positive-border, #0074e9);
+}
+.wkrr-forecast-hours .review-forecast-widget__row {
+  /* Half of WaniKani's own --spacing-xxtight: enough of a gap that each bar
+     reads as its own hour, without the eleven of them doubling the widget. */
+  padding-top: 2px;
+  padding-bottom: 2px;
+  font-size: var(--font-size-xsmall, 14px);
+}
+.wkrr-forecast-hours .review-forecast-widget__increase-bar { height: 14px; }
+/* The day rows are the index; the hours under them are the detail. */
+.wkrr-forecast-hours .review-forecast-widget__title { opacity: .8; }
+
+/*
+ * The Level Progress widget's radicals and kanji, embedded under its own
+ * Radicals / Kanji / Vocabulary cards instead of behind their "See All". The
+ * items are clones of WaniKani's, so they keep their own characters and SRS
+ * pills; only the box around them is ours. Vocabulary is deliberately left
+ * out - a hundred-odd items would bury the widget, and it stays one click away.
+ */
+#wkrr-level-items {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-tight, 12px);
+  margin-bottom: var(--spacing-normal, 16px);
+}
+.wkrr-level-items__group {
+  border: 1px solid var(--color-level-progress-subjects-border, #d5d5d5);
+  border-radius: var(--border-radius-normal, 4px);
+  overflow: hidden;
+}
+.wkrr-level-items__head {
+  display: flex;
+  align-items: baseline;
+  gap: 1ch;
+  padding: var(--spacing-xtight, 8px) var(--spacing-tight, 12px);
+  font-size: var(--font-size-xsmall, 14px);
+  color: var(--color-widget-secondary-text, #666666);
+}
+.wkrr-level-items__title { font-weight: var(--font-weight-heavy, 700); }
+.wkrr-level-items__count { margin-left: auto; }
+/*
+ * WaniKani's own grid, minus the flex:1 1 0 that only makes sense inside the
+ * detail panel, where it is a child of a fixed-height overlay. Here it is as
+ * tall as its contents up to a cap: a level's radicals never reach it, its
+ * kanji can, and past that the widget would push everything below it off the
+ * screen. overflow-y is auto rather than WaniKani's scroll, so the groups that
+ * fit - which is most of them - show no gutter at all.
+ */
+.wkrr-level-items__grid {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: var(--spacing-tight, 12px) var(--spacing-normal, 16px);
+  padding: var(--spacing-tight, 12px);
+  max-height: 300px;
+  overflow-y: auto;
+  background: var(--color-level-progress-subjects-background, #f4f4f4);
+  border-top: 1px solid var(--color-level-progress-subjects-border, #d5d5d5);
+}
+`;
+
+  // src/wanikani/forecast.ts
+  var HOURS_CLASS = "wkrr-forecast-hours";
+  var WIDGET_STYLE_ID = "wkrr-widget-style";
+  function isToday(row) {
+    const title = row.querySelector(".review-forecast-widget__title");
+    const shown = (title?.textContent || "").trim().toLowerCase();
+    if (!shown) return false;
+    const now = /* @__PURE__ */ new Date();
+    return shown === now.toLocaleDateString("en-US", { weekday: "short" }).toLowerCase() || shown === now.toLocaleDateString("en-US", { weekday: "long" }).toLowerCase() || shown === "today";
+  }
+  function todaysHours(list) {
+    const row = list.querySelector("a.review-forecast-widget__row");
+    if (!row || !isToday(row)) return null;
+    const id = row.getAttribute("aria-controls");
+    const panel = id ? document.getElementById(id) : null;
+    const rows = panel?.querySelector(".review-forecast-widget__rows");
+    return rows && id ? { row, rows, id } : null;
+  }
+  function ensureForecastHours() {
+    const list = document.querySelector(
+      ".review-forecast-widget__forecast .review-forecast-widget__rows"
+    );
+    if (!list) return;
+    const existing = list.querySelector("." + HOURS_CLASS);
+    const today = todaysHours(list);
+    if (!today) {
+      if (existing) existing.remove();
+      return;
+    }
+    if (existing && existing.dataset.forecastFor === today.id) return;
+    if (existing) existing.remove();
+    ensureStyle(WIDGET_STYLE_ID, WIDGET_CSS);
+    const hours = today.rows.cloneNode(true);
+    hours.classList.add(HOURS_CLASS);
+    hours.dataset.forecastFor = today.id;
+    today.row.after(hours);
+  }
+
+  // src/wanikani/level-progress.ts
+  var CONTAINER_ID = "wkrr-level-items";
+  var WIDGET_STYLE_ID2 = "wkrr-widget-style";
+  var EMBEDDED = ["radical", "kanji"];
+  function textOf(root, selector) {
+    return (root.querySelector(selector)?.textContent || "").trim();
+  }
+  function groupFor(widget, type) {
+    const card2 = widget.querySelector(".level-progress-widget__item-type-stat--" + type);
+    const id = card2?.getAttribute("aria-controls");
+    const panel = id ? document.getElementById(id) : null;
+    const items = panel ? [...panel.querySelectorAll(".level-progress-widget__subject-list-item")] : [];
+    if (!card2 || !id || !items.length) return null;
+    return {
+      id,
+      title: textOf(card2, ".level-progress-widget__item-type-stat-title") || type,
+      // "3/35" - the same "Guru'd out of all of them" the card itself shows.
+      count: textOf(card2, ".level-progress-widget__item-type-stat-progress-count"),
+      items
+    };
+  }
+  function buildGroup(group) {
+    return el(
+      "section",
+      { class: "wkrr-level-items__group" },
+      el(
+        "div",
+        { class: "wkrr-level-items__head" },
+        el("span", { class: "wkrr-level-items__title", text: group.title }),
+        group.count ? el("span", { class: "wkrr-level-items__count", text: group.count }) : null
+      ),
+      el(
+        "div",
+        { class: "wkrr-level-items__grid" },
+        group.items.map((item) => item.cloneNode(true))
+      )
+    );
+  }
+  function ensureLevelItems() {
+    const widget = document.querySelector(".level-progress-widget");
+    const stats = widget?.querySelector(".level-progress-widget__item-type-stats");
+    const existing = document.getElementById(CONTAINER_ID);
+    if (!widget || !stats) {
+      if (existing) existing.remove();
+      return;
+    }
+    const groups = EMBEDDED.map((type) => groupFor(widget, type)).filter(
+      (group) => group !== null
+    );
+    if (!groups.length) {
+      if (existing) existing.remove();
+      return;
+    }
+    const stamp = groups.map((group) => group.id).join(" ");
+    if (existing && existing.dataset.levelItemsFor === stamp) return;
+    if (existing) existing.remove();
+    ensureStyle(WIDGET_STYLE_ID2, WIDGET_CSS);
+    const container = el("div", { id: CONTAINER_ID }, groups.map(buildGroup));
+    container.dataset.levelItemsFor = stamp;
+    stats.after(container);
+  }
+
   // src/wanikani/styles/progress.css.ts
   var PROGRESS_CSS = `
 .wkrr-progress {
@@ -1174,11 +1353,7 @@
       return;
     }
     if (existing && existing.dataset.at === String(tally.at)) return;
-    if (!document.getElementById("wkrr-progress-style")) {
-      (document.head || document.documentElement).append(
-        el("style", { id: "wkrr-progress-style", text: PROGRESS_CSS })
-      );
-    }
+    ensureStyle("wkrr-progress-style", PROGRESS_CSS);
     const row = existing || el("div", { id: "wkrr-progress", class: "dashboard__row" });
     row.dataset.at = String(tally.at);
     row.replaceChildren(
@@ -3262,9 +3437,7 @@ html.wkrr-collapsed #wkrr-panel {
 
   // src/wanikani/main.ts
   function ensureDarkTheme() {
-    if (document.getElementById("wkrr-dark-theme")) return;
-    const style = el("style", { id: "wkrr-dark-theme", text: DARK_THEME_CSS });
-    (document.head || document.documentElement).append(style);
+    ensureStyle("wkrr-dark-theme", DARK_THEME_CSS);
   }
   function ensureUI() {
     if (!isReviewPage()) {
@@ -3276,9 +3449,7 @@ html.wkrr-collapsed #wkrr-panel {
       hidePeek();
       return;
     }
-    if (!document.getElementById("wkrr-style")) {
-      document.head.append(el("style", { id: "wkrr-style", text: CSS }));
-    }
+    ensureStyle("wkrr-style", CSS);
     if (!document.getElementById("wkrr-panel")) {
       document.body.append(el("div", { id: "wkrr-panel" }));
       render();
@@ -3310,6 +3481,8 @@ html.wkrr-collapsed #wkrr-panel {
     ensureLevelMark();
     refreshProgress();
     ensureProgressWidget();
+    ensureForecastHours();
+    ensureLevelItems();
   }
   tick();
   document.addEventListener("turbo:load", tick);

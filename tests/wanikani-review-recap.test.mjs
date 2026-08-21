@@ -1038,6 +1038,222 @@ check(
   !quizPage.window.document.getElementById('wkrr-progress') && quizPage.asked.length === 0
 );
 
+// -- the lesson quiz moved out from under /subjects ---------------------------
+/*
+ * Reviews are still /subjects/review, but lessons are not: WaniKani serves them
+ * from /subject-lessons/<session>/<subject>, and their quiz - the half with a
+ * recap worth keeping - from /subject-lessons/<session>/quiz. Matching only the
+ * old /subjects/lesson/quiz left the panel, the peek and the level marker
+ * silently switched off for every lesson.
+ */
+const lessonsSnapshot = fs.readFileSync(path.join(SNAPSHOTS, 'WaniKani _ Lessons.html'), 'utf8');
+check(
+  'the lesson quiz URL is the one WaniKani links to from a lesson',
+  /\/subject-lessons\/-?\d+\/quiz\?queue=/.test(lessonsSnapshot)
+);
+check(
+  'and nothing under /subjects/lesson is served any more',
+  !lessonsSnapshot.includes('/subjects/lesson')
+);
+
+const QUIZ_HTML = `<!doctype html><html><head></head><body>
+   <div class="quiz"><div class="quiz__content">lesson quiz</div></div>
+ </body></html>`;
+
+for (const [label, url, wanted] of [
+  ['a lesson quiz', 'https://www.wanikani.com/subject-lessons/-1345702715735784053/quiz?queue=5167-5168', true],
+  ['a review', 'https://www.wanikani.com/subjects/review', true],
+  ['extra study', 'https://www.wanikani.com/subjects/extra_study', true],
+  ['the lesson slides', 'https://www.wanikani.com/subject-lessons/-1345702715735784053/5167', false],
+  ['the lesson picker', 'https://www.wanikani.com/subject-lessons/picker', false],
+  ['the dashboard', 'https://www.wanikani.com/dashboard', false],
+]) {
+  const probe = runUserscript('wanikani-review-recap.user.js', { url, html: QUIZ_HTML });
+  await flush();
+  const built = !!probe.window.document.getElementById('wkrr-panel');
+  check(`the panel is ${wanted ? 'built' : 'left off'} on ${label}`, built === wanted);
+}
+
+// The peek is the part that was asked for, so check it end to end rather than
+// inferring it from the panel being there.
+const lessonQuiz = runUserscript('wanikani-review-recap.user.js', {
+  url: 'https://www.wanikani.com/subject-lessons/-1345702715735784053/quiz?queue=5167',
+  html: QUIZ_HTML,
+});
+lessonQuiz.window.dispatchEvent(
+  new lessonQuiz.window.CustomEvent('willShowNextQuestion', {
+    detail: { subject: kanji, questionType: 'meaning' },
+  })
+);
+lessonQuiz.window.dispatchEvent(
+  new lessonQuiz.window.KeyboardEvent('keydown', { key: 'Shift' })
+);
+const lessonPeek = lessonQuiz.window.document.getElementById('wkrr-peek');
+check('holding Shift in a lesson quiz reveals the item', !!lessonPeek && lessonPeek.classList.contains('is-visible'));
+check('the peek carries the meaning', !!lessonPeek && lessonPeek.textContent.includes('Hot Water'));
+check('...and the reading', !!lessonPeek && /ゆ/.test(lessonPeek.textContent));
+
+// -- Next 24 Hours: today's hours, shown in place -----------------------------
+/*
+ * WaniKani's own widget, lifted whole out of the dashboard snapshot. Its first
+ * row is Sat, so the probe's clock says Saturday; the hourly rows behind that
+ * row are the 11 rows from 11 AM to 9 PM.
+ */
+const forecastAt = dashboardSnapshot.indexOf('review-forecast-widget review-forecast-widget--');
+const forecastStart = dashboardSnapshot.lastIndexOf('<turbo-frame', forecastAt);
+const forecastWidget = dashboardSnapshot.slice(
+  forecastStart,
+  dashboardSnapshot.indexOf('</turbo-frame>', forecastAt) + '</turbo-frame>'.length
+);
+check(
+  'the forecast widget keeps its hours behind a click',
+  / hidden=""/.test(forecastWidget) && forecastWidget.includes('detail#showDetail')
+);
+
+/** The script reads the day off WaniKani's own English rendering of it. */
+function forecastProbe(weekday) {
+  return runUserscript('wanikani-review-recap.user.js', {
+    url: 'https://www.wanikani.com/dashboard',
+    html: `<!doctype html><html><head></head><body>${forecastWidget}</body></html>`,
+    setup(window) {
+      const names = { Sat: 'Saturday', Sun: 'Sunday' };
+      window.Date.prototype.toLocaleDateString = function (locale, options) {
+        return options && options.weekday === 'long' ? names[weekday] : weekday;
+      };
+    },
+  });
+}
+
+const forecast = forecastProbe('Sat');
+const forecastDoc = forecast.window.document;
+const dayList = forecastDoc.querySelector(
+  '.review-forecast-widget__forecast .review-forecast-widget__rows'
+);
+const hours = dayList.querySelector('.wkrr-forecast-hours');
+const dayRows = [...dayList.children].filter((n) => n.matches('a.review-forecast-widget__row'));
+const titlesIn = (root) =>
+  [...root.querySelectorAll('.review-forecast-widget__title')].map((n) => n.textContent.trim());
+
+check('the hourly breakdown is shown without a click', !!hours);
+check(
+  'it sits between today and the next day',
+  !!hours && hours.previousElementSibling === dayRows[0] && hours.nextElementSibling === dayRows[1]
+);
+check(
+  'it is the hours WaniKani had behind that row',
+  !!hours && JSON.stringify(titlesIn(hours)) ===
+    JSON.stringify(['11 AM', '12 PM', '1 PM', '2 PM', '3 PM', '4 PM', '5 PM', '6 PM', '7 PM', '8 PM', '9 PM']),
+  hours && JSON.stringify(titlesIn(hours))
+);
+check('every day is still listed', dayRows.length === 5, String(dayRows.length));
+check(
+  'the day rows are untouched',
+  JSON.stringify(titlesIn(dayList).slice(0, 1)) === '["Sat"]' &&
+    dayRows.every((row) => row.hasAttribute('aria-controls'))
+);
+check(
+  "WaniKani's own drill-in panel is left as it was",
+  [...forecastDoc.querySelectorAll('.review-forecast-widget__detail')].every((d) => d.hidden) &&
+    forecastDoc.querySelectorAll('.review-forecast-widget__detail .review-forecast-widget__rows')
+      .length === 5
+);
+const widgetCss = forecastDoc.getElementById('wkrr-widget-style');
+check('the widget stylesheet is injected', !!widgetCss);
+check(
+  'the hourly bars are spaced apart rather than run together',
+  /\.wkrr-forecast-hours \.review-forecast-widget__row \{[^}]*padding-top: 2px/.test(
+    widgetCss.textContent
+  )
+);
+check(
+  'a group of items is capped rather than pushing the page down',
+  /\.wkrr-level-items__grid \{[^}]*max-height: 300px;[^}]*overflow-y: auto/.test(
+    widgetCss.textContent
+  )
+);
+
+forecast.tick();
+forecast.tick();
+check(
+  'the tick neither duplicates the hours nor rebuilds them',
+  forecastDoc.querySelectorAll('.wkrr-forecast-hours').length === 1 &&
+    forecastDoc.querySelector('.wkrr-forecast-hours') === hours
+);
+
+// A day that is not today is nobody's "next few hours".
+const tomorrow = forecastProbe('Sun');
+check(
+  'a first row that is not today is left folded up',
+  !tomorrow.window.document.querySelector('.wkrr-forecast-hours')
+);
+
+// -- Level Progress: radicals and kanji, embedded ------------------------------
+const levelProbe = runUserscript('wanikani-review-recap.user.js', {
+  url: 'https://www.wanikani.com/dashboard',
+  html: `<!doctype html><html><head></head><body>${levelWidget}</body></html>`,
+});
+const levelDoc = levelProbe.window.document;
+const embedded = levelDoc.getElementById('wkrr-level-items');
+const groups = embedded ? [...embedded.querySelectorAll('.wkrr-level-items__group')] : [];
+const groupTitle = (i) => groups[i].querySelector('.wkrr-level-items__title').textContent;
+const groupItems = (i) => groups[i].querySelectorAll('.level-progress-widget__subject-list-item').length;
+
+check('the level items are embedded in the widget', !!embedded);
+check(
+  'right below the Radicals / Kanji / Vocabulary cards',
+  !!embedded &&
+    embedded.previousElementSibling ===
+      levelDoc.querySelector('.level-progress-widget__item-type-stats')
+);
+check('two groups are embedded, not three', groups.length === 2, String(groups.length));
+check('radicals first', groups.length === 2 && groupTitle(0) === 'Radicals', groups.length === 2 && groupTitle(0));
+check('then kanji', groups.length === 2 && groupTitle(1) === 'Kanji', groups.length === 2 && groupTitle(1));
+check('every radical on the level is shown', groups.length === 2 && groupItems(0) === 6);
+check('every kanji on the level is shown', groups.length === 2 && groupItems(1) === 35);
+check(
+  "each group carries the card's own Guru'd count",
+  groups.length === 2 &&
+    groups[0].querySelector('.wkrr-level-items__count').textContent === '0/6' &&
+    groups[1].querySelector('.wkrr-level-items__count').textContent === '3/35'
+);
+check(
+  'vocabulary stays one click away',
+  !!embedded && !embedded.textContent.includes('Vocabulary')
+);
+check(
+  'the items are real ones, with their characters and SRS pills',
+  groups.length === 2 &&
+    !!groups[0].querySelector('.subject-character__characters-text') &&
+    !!groups[0].querySelector('.subject-srs-progress__stage-pill')
+);
+check(
+  "WaniKani's own subject lists are left alone",
+  [...levelDoc.querySelectorAll('.level-progress-widget__subject-list')].every((d) => d.hidden) &&
+    levelDoc.querySelectorAll(
+      '.level-progress-widget__subject-list .level-progress-widget__subject-list-item'
+    ).length === 163
+);
+
+levelProbe.tick();
+levelProbe.tick();
+check(
+  'the tick neither duplicates the groups nor rebuilds them',
+  levelDoc.querySelectorAll('#wkrr-level-items').length === 1 &&
+    levelDoc.getElementById('wkrr-level-items') === embedded
+);
+
+// The widget is the only place either of these belongs.
+const bareDash = runUserscript('wanikani-review-recap.user.js', {
+  url: 'https://www.wanikani.com/dashboard',
+  html: DASHBOARD,
+});
+bareDash.tick();
+check(
+  'neither is built on a dashboard without the widgets',
+  !bareDash.window.document.getElementById('wkrr-level-items') &&
+    !bareDash.window.document.querySelector('.wkrr-forecast-hours')
+);
+
 const css = document.getElementById('wkrr-style').textContent;
 check('type colours defer to WaniKani/theme variables', css.includes('var(--color-kanji'));
 check('the dark palette follows the Elementary Dark variables', css.includes('--USER-surface-1'));

@@ -10,9 +10,11 @@
  * events that would tell us it changed.
  */
 import { checkClockChange } from './counts';
-import { el } from './dom';
+import { el, ensureStyle } from './dom';
 import { onAnswer, onComplete, onNextQuestion } from './events';
+import { ensureForecastHours } from './forecast';
 import { ensureCurrentLevel, ensureLevelMark, loadCurrentLevel } from './level';
+import { ensureLevelItems } from './level-progress';
 import { render } from './panel';
 import { hidePeek, onKeyDown, onKeyUp } from './peek';
 import { ensureProgressWidget, loadProgress, refreshProgress } from './progress';
@@ -30,9 +32,7 @@ import type { TurboVisitDetail } from './types';
  * through any later DOM churn.
  */
 function ensureDarkTheme() {
-  if (document.getElementById('wkrr-dark-theme')) return;
-  const style = el('style', { id: 'wkrr-dark-theme', text: DARK_THEME_CSS });
-  (document.head || document.documentElement).append(style);
+  ensureStyle('wkrr-dark-theme', DARK_THEME_CSS);
 }
 
 function ensureUI() {
@@ -47,9 +47,7 @@ function ensureUI() {
     hidePeek();
     return;
   }
-  if (!document.getElementById('wkrr-style')) {
-    document.head.append(el('style', { id: 'wkrr-style', text: CSS }));
-  }
+  ensureStyle('wkrr-style', CSS);
   if (!document.getElementById('wkrr-panel')) {
     document.body.append(el('div', { id: 'wkrr-panel' }));
     render();
@@ -95,6 +93,9 @@ function tick() {
   ensureLevelMark();
   refreshProgress();
   ensureProgressWidget();
+  // Two of WaniKani's own dashboard widgets, unfolded in place.
+  ensureForecastHours();
+  ensureLevelItems();
 }
 
 tick();
