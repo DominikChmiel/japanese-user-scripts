@@ -466,26 +466,44 @@ const dashboardHtml = (lessons, reviews) => `<!doctype html><html><head></head><
  </body></html>`;
 
 /**
- * The script samples the hour at boot and only acts when it changes, so pin
- * `getHours` before it runs and move it afterwards. `fetches` records what the
- * script asked the server for - jsdom has no fetch of its own.
+ * The script samples the hour and the date at boot and only acts when one of
+ * them moves, so pin both before it runs and move them afterwards. `fetches`
+ * records what the script asked the server for - jsdom has no fetch of its own.
+ * jsdom has no Turbo either, so `reloads` stands in for `<turbo-frame>.reload`.
  */
 function countProbe({ url, html, served }) {
-  const clock = { hour: 10 };
+  const clock = { hour: 10, date: 'Fri Aug 07 2026' };
   const fetches = [];
+  const reloads = [];
   const probe = runUserscript('wanikani-review-recap.user.js', {
     url,
     html,
     setup(window) {
       window.Date.prototype.getHours = () => clock.hour;
+      window.Date.prototype.toDateString = () => clock.date;
       window.fetch = (target, options) => {
         fetches.push({ target, options });
         return Promise.resolve({ ok: true, text: () => Promise.resolve(served) });
       };
     },
   });
-  return { ...probe, clock, fetches };
+  probe.window.document.querySelectorAll('turbo-frame[src]').forEach((frame) => {
+    frame.reload = () => reloads.push(frame.id);
+  });
+  return { ...probe, clock, fetches, reloads };
 }
+
+/** What the script should be stamping onto the day-scoped URLs: local midnight. */
+function localMidnight() {
+  const midnight = new Date();
+  midnight.setHours(0, 0, 0, 0);
+  return midnight.toISOString();
+}
+
+const dayParam = (node, attribute) =>
+  new URL(node.getAttribute(attribute), 'https://www.wanikani.com').searchParams.get(
+    'utc_time_at_start_of_day'
+  );
 
 const dash = countProbe({
   url: 'https://www.wanikani.com/dashboard',
@@ -549,6 +567,186 @@ quiz.clock.hour = 11;
 quiz.tick();
 await flush();
 check('a quiz page never fetches mid-session', quiz.fetches.length === 0);
+
+// -- the day turning also refreshes the lesson state -------------------------
+/*
+ * Reviews only ever get more numerous; lessons get a whole new allowance at
+ * midnight. WaniKani renders that day into the page - the frames behind the
+ * counts and the Today's Lessons widget are fetched with
+ * `utc_time_at_start_of_day`, and every link into the lesson queue repeats it -
+ * and its own controllers only write that stamp when they connect. So a plain
+ * `frame.reload()` after midnight would fetch yesterday all over again.
+ */
+const YESTERDAY = '2026-08-07T22:00:00.000Z';
+const stamped = (base) => base + encodeURIComponent(YESTERDAY);
+const START_LESSONS = 'https://www.wanikani.com/subject-lessons/start?utc_time_at_start_of_day=';
+
+const framedHtml = `<!doctype html><html><head></head><body>
+   <turbo-frame id="counts" src="${stamped(
+     'https://www.wanikani.com/lesson-and-review-count?browser_timezone=Europe%2FBerlin&utc_time_at_start_of_day='
+   )}">
+     <div class="lesson-and-review-count">
+       <a class="lesson-and-review-count__item" href="${stamped(START_LESSONS)}">
+         <span class="lesson-and-review-count__count">0</span>
+       </a>
+     </div>
+   </turbo-frame>
+   <turbo-frame id="lessons-widget" src="${stamped(
+     'https://www.wanikani.com/widgets/todays-lessons?theme=neon&widget_frame=lessons-widget&browser_timezone=Europe%2FBerlin&utc_time_at_start_of_day='
+   )}">
+     <div class="todays-lessons-widget todays-lessons-widget--complete">
+       <span class="count-bubble"><span class="count-bubble__text">0</span></span>
+       <a class="wk-button" href="${stamped(START_LESSONS)}">Start Lessons</a>
+     </div>
+   </turbo-frame>
+   <turbo-frame id="level-progress" src="${stamped(
+     'https://www.wanikani.com/widgets/level-progress?utc_time_at_start_of_day='
+   )}"><div class="level-progress-widget"></div></turbo-frame>
+ </body></html>`;
+
+// The fixture above is a stand-in - check its shape against the real dashboard.
+check(
+  'the Today\'s Lessons widget is the class the script looks for',
+  dashboardSnapshot.includes('class="todays-lessons-widget ')
+);
+check(
+  'its frame carries the day stamp the script rewrites',
+  /widgets\/todays-lessons[^"]*utc_time_at_start_of_day=/.test(dashboardSnapshot)
+);
+check(
+  'so does the link into the lesson queue',
+  dashboardSnapshot.includes('/subject-lessons/start?utc_time_at_start_of_day=')
+);
+
+// The hour turning is not the day turning: reload the frames as they stand.
+const sameDay = countProbe({ url: 'https://www.wanikani.com/dashboard', html: framedHtml });
+sameDay.clock.hour = 11;
+sameDay.tick();
+await flush();
+check(
+  'the hour turning reloads the count frames',
+  JSON.stringify(sameDay.reloads.sort()) === '["counts","lessons-widget"]',
+  JSON.stringify(sameDay.reloads)
+);
+check(
+  'the day stamp is left where it was',
+  dayParam(sameDay.window.document.getElementById('counts'), 'src') === YESTERDAY
+);
+check(
+  'the page is not re-fetched when every count lives in a frame',
+  sameDay.fetches.length === 0
+);
+
+// Midnight: point the frames at today, which is itself the reload.
+const midnight = countProbe({ url: 'https://www.wanikani.com/dashboard', html: framedHtml });
+const today = localMidnight();
+midnight.clock.hour = 0;
+midnight.clock.date = 'Sat Aug 08 2026';
+midnight.tick();
+await flush();
+const frameAt = (id) => dayParam(midnight.window.document.getElementById(id), 'src');
+check('the count frame is restamped for the new day', frameAt('counts') === today, frameAt('counts'));
+check(
+  'so is the Today\'s Lessons widget - the allowance resets with the date',
+  frameAt('lessons-widget') === today,
+  frameAt('lessons-widget')
+);
+check(
+  'a frame with nothing of ours in it is left alone',
+  frameAt('level-progress') === YESTERDAY
+);
+check(
+  'restamping is the reload - the frames are not fetched twice',
+  midnight.reloads.length === 0,
+  JSON.stringify(midnight.reloads)
+);
+check(
+  'the rest of the frame src survives the rewrite',
+  midnight.window.document.getElementById('lessons-widget').getAttribute('src').includes(
+    'widget_frame=lessons-widget'
+  ) &&
+    midnight.window.document
+      .getElementById('lessons-widget')
+      .getAttribute('src')
+      .includes('theme=neon')
+);
+check(
+  'both links into the lesson queue point at today',
+  [...midnight.window.document.querySelectorAll('a[href*="subject-lessons/start"]')].every(
+    (link) => dayParam(link, 'href') === today
+  )
+);
+
+midnight.tick();
+await flush();
+check('it turns the day over once, not every tick', midnight.reloads.length === 0);
+check(
+  'and the stamp is not rewritten again',
+  frameAt('counts') === today
+);
+
+// Without frames the widget is swapped whole: the count is only part of what
+// the new day changes - so are the "done for today" state and the button.
+const widgetHtml = (lessons, done) => `<!doctype html><html><head></head><body>
+   <nav><span class="count-bubble">${lessons}</span></nav>
+   <div class="todays-lessons-widget${done ? ' todays-lessons-widget--complete' : ''}">
+     <span class="count-bubble">${lessons}</span>
+     <a class="wk-button" href="${stamped(START_LESSONS)}">Start Lessons</a>
+   </div>
+ </body></html>`;
+
+const plainDay = countProbe({
+  url: 'https://www.wanikani.com/dashboard',
+  html: widgetHtml(0, true),
+  served: widgetHtml(15, false),
+});
+plainDay.clock.hour = 0;
+plainDay.clock.date = 'Sat Aug 08 2026';
+plainDay.tick();
+await flush();
+const dayWidget = () => plainDay.window.document.querySelector('.todays-lessons-widget');
+check('the day turning re-fetches the page', plainDay.fetches.length === 1);
+check(
+  'the widget stops claiming you are done for the day',
+  dayWidget() && !dayWidget().classList.contains('todays-lessons-widget--complete')
+);
+check(
+  'the new allowance is showing',
+  dayWidget() && dayWidget().querySelector('.count-bubble').textContent === '15'
+);
+check(
+  'the badge outside the widget moved too',
+  plainDay.window.document.querySelector('nav .count-bubble').textContent === '15'
+);
+check(
+  'the swapped-in link points at today',
+  dayParam(dayWidget().querySelector('a'), 'href') === localMidnight()
+);
+
+// An hour change leaves the widget alone - only the counts move on the hour.
+const plainHour = countProbe({
+  url: 'https://www.wanikani.com/dashboard',
+  html: widgetHtml(0, true),
+  served: widgetHtml(15, false),
+});
+plainHour.clock.hour = 11;
+plainHour.tick();
+await flush();
+const hourWidget = plainHour.window.document.querySelector('.todays-lessons-widget');
+check(
+  'the hour turning still moves the counts',
+  [...plainHour.window.document.querySelectorAll('.count-bubble')].every(
+    (n) => n.textContent === '15'
+  )
+);
+check(
+  'but leaves the day-scoped state as it was',
+  hourWidget.classList.contains('todays-lessons-widget--complete')
+);
+check(
+  'and leaves the day stamp on the link alone',
+  dayParam(hourWidget.querySelector('a'), 'href') === YESTERDAY
+);
 
 // -- overall progress widget -------------------------------------------------
 // wkof hands back one entry per subject with its assignment attached. An

@@ -152,7 +152,7 @@ only opened when it is not already open, so WaniKani's own
 Item Info also renders at a larger font size — WaniKani's own `--font-size-*`
 scale times `ITEM_INFO_FONT_SCALE` (1.15), scoped to that frame.
 
-### Lesson and review counts refresh on the hour
+### Lesson and review counts refresh on the hour, lessons again at midnight
 
 WaniKani hands out new lessons and reviews on the hour, but the counts are baked
 into the page at load time — a tab left open keeps advertising the 07:00 batch.
@@ -167,6 +167,33 @@ global navigation). Counts that live in a lazy `<turbo-frame>` are handed to
 Turbo's own `frame.reload()` instead. If neither matches, or the re-fetched page
 comes back a different shape, nothing is touched — a stale number beats a mangled
 page. Quiz pages are skipped entirely.
+
+Midnight is a bigger event than the hour, because the **daily lesson allowance
+resets with the date**. WaniKani renders the day into the page rather than
+inferring it: the frames behind the counts and the Today's Lessons widget are
+fetched with `utc_time_at_start_of_day=<your local midnight>`, and every link
+into the lesson queue (`/subject-lessons/start`) repeats it. Its own
+`set-time-zone` / `dashboard-widget` controllers write that stamp when they
+connect and never again — so a plain `frame.reload()` after midnight would just
+fetch *yesterday* over again, allowance and all.
+
+So when the date turns, the stamp is rewritten to the new local midnight before
+anything is fetched:
+
+- the day-scoped `<turbo-frame src>` is repointed at today, which **is** its
+  reload — Turbo loads a frame whose `src` changes, so it is not asked for a
+  second one. Everything else in the URL (`widget_frame`, `theme`,
+  `browser_timezone`) is left exactly as WaniKani wrote it;
+- `.todays-lessons-widget` is swapped **whole**, not just the count inside it —
+  the "done for today" state and the Start Lessons button are day-scoped too;
+- the `utc_time_at_start_of_day` on lesson links is restamped as a safety net,
+  so a failed refresh (offline, expired session) cannot leave a button that asks
+  the server for yesterday's batch.
+
+Frames with nothing of ours in them are left alone. The date is checked
+alongside the hour, not instead of it, so midnight — which moves both — makes one
+pass rather than two; a timezone change or the repeated DST hour can move the
+date without moving the hour, so neither is assumed from the other.
 
 ### How it hooks in
 
