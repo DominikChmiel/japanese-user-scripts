@@ -221,6 +221,37 @@ check(
   !document.getElementById('wkrr-panel').textContent.includes('湯')
 );
 
+/*
+ * An empty group renders as nothing at all. section() returns null for one, and
+ * ParentNode.append() turns a null argument into the literal text "null" rather
+ * than skipping it - so the "All" view used to print "null" under the cards for
+ * as long as either group was empty, which is most of a session.
+ */
+const loose = runUserscript('wanikani-review-recap.user.js', {
+  url: 'https://www.wanikani.com/subjects/review',
+  html: '<!doctype html><html><head></head><body><div class="quiz"></div></body></html>',
+});
+loose.window.dispatchEvent(
+  new loose.window.CustomEvent('didAnswerQuestion', {
+    detail: {
+      subjectWithStats: { subject: kanji, stats: { meaning: { complete: false, incorrect: 1 } } },
+      questionType: 'meaning',
+      answer: 'hot spring',
+      results: { action: 'fail' },
+    },
+  })
+);
+await flush();
+const looseBody = loose.window.document.querySelector('.wkrr-body');
+const strays = [...looseBody.childNodes]
+  .filter((node) => node.nodeType === 3)
+  .map((node) => node.textContent);
+check(
+  'nothing failed yet means one empty group, and an empty group renders nothing',
+  !!looseBody.querySelector('.wkrr-card') && strays.length === 0,
+  JSON.stringify(strays)
+);
+
 // Typed answers are untrusted text and must never become live DOM.
 answer(subjects.find((s) => s.id === 4443), 'meaning', 'fail', '<img src=x onerror=alert(1)>');
 await flush();

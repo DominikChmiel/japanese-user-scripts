@@ -15,6 +15,10 @@ get wrong?* — in the way that suits each site.
    `.user.js` file in the browser and confirm the install prompt.
 3. Both scripts use `@grant none` and no external dependencies.
 
+`wanikani-review-recap.user.js` is built from `src/wanikani/` and checked in, so
+that link stays a working install link — see [Building](#building) before
+editing it.
+
 ---
 
 ## WaniKani Review Recap Sidebar
@@ -268,16 +272,61 @@ From the console you also get `window.bunproMistakeRecap` with `.mistakes`,
 
 ---
 
+## Building
+
+The WaniKani script is written as TypeScript modules under `src/wanikani/` and
+bundled by [esbuild](https://esbuild.github.io/) into the single `.user.js` at
+the repository root. The bundle is a build artefact but is **committed anyway**:
+userscripts are installed by opening their raw URL, so the built file is the
+product.
+
+```bash
+npm install
+npm run build         # src/wanikani -> wanikani-review-recap.user.js
+npm run watch         # rebuild on save
+npm run typecheck     # tsc --noEmit
+```
+
+Edit the modules, never the bundle — `npm run build` overwrites it. Bundling
+strips comments, so the explanation of any given piece lives next to it in
+`src/`, which is where to read the script rather than in the artefact.
+
+esbuild only erases the types, it does not check them; `npm run typecheck` is
+the pass that does, and it is worth running before committing. `npm test` builds
+first, so a stale bundle can never be what the suite is testing.
+
+| Module | What lives there |
+| --- | --- |
+| `main.ts` | Boot, the event wiring and the 2s tick. The only module with side effects. |
+| `config.ts` | Tunables, storage keys and the type/colour/label lookup tables. |
+| `types.ts` | WaniKani's payload shapes and the record the panel keeps. |
+| `state.ts` | The session store and its trip through `localStorage`. |
+| `subject.ts` | One item: how a subject becomes a record, and how it reads. |
+| `panel.ts` | The sidebar — cards, sections, filter tabs, copy-as-text. |
+| `peek.ts` | Shift-to-peek, and the burn it refuses to give away. |
+| `events.ts` | The three quiz events, turned into records. |
+| `item-info.ts` | Opening and expanding WaniKani's own Item Info panel. |
+| `session.ts` | Which URLs are a review, and what a new session resets. |
+| `srs.ts` | SRS stages read off the quiz page's own JSON payload. |
+| `counts.ts` | The hourly count refresh and the midnight lesson rollover. |
+| `level.ts` | The current-level marker under the character. |
+| `progress.ts` | The dashboard's overall-progress bar (needs wkof). |
+| `styles/*.css.ts` | The three stylesheets, as tagged template literals. |
+
+`bunpro-mistake-recap.user.js` is a single file and is not built — it is edited
+directly.
+
 ## Tests
 
 Both scripts are exercised in `jsdom` against the real page snapshots in
 `snapshots/` — the WaniKani suite replays a session through the actual subject
 queue JSON and the real event shapes, the Bunpro suite flips the real
-`data-meta-*` attributes.
+`data-meta-*` attributes. The WaniKani suite runs against the **bundle**, not
+the sources, so it tests what actually gets installed.
 
 ```bash
 npm install
-npm test              # both suites
+npm test              # builds, then runs both suites
 npm run test:wanikani
 npm run test:bunpro
 ```

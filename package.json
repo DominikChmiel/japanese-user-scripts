@@ -5,11 +5,18 @@
   "description": "Tampermonkey userscripts that summarise what you got wrong in a WaniKani / Bunpro review session.",
   "type": "module",
   "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch",
+    "typecheck": "tsc -p .",
+    "pretest": "npm run build",
     "test": "node tests/run.mjs",
+    "pretest:wanikani": "npm run build",
     "test:wanikani": "node tests/wanikani-review-recap.test.mjs",
     "test:bunpro": "node tests/bunpro-mistake-recap.test.mjs"
   },
   "devDependencies": {
-    "jsdom": "^27.0.0"
+    "esbuild": "^0.28.2",
+    "jsdom": "^27.0.0",
+    "typescript": "^7.0.2"
   }
 }
